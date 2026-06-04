@@ -1,0 +1,20 @@
+{
+  "defaultJobLevel": 1,
+  "jobs": [
+    { "level": 1,  "title": "Street Vendor 🛒",         "salary": 500,    "upgradeCost": 0      },
+    { "level": 2,  "title": "Cashier 🏪",               "salary": 1000,   "upgradeCost": 3000   },
+    { "level": 3,  "title": "Security Guard 👮",         "salary": 1800,   "upgradeCost": 8000   },
+    { "level": 4,  "title": "Electrician ⚡",            "salary": 2500,   "upgradeCost": 15000  },
+    { "level": 5,  "title": "Mechanic 🔧",              "salary": 3500,   "upgradeCost": 30000  },
+    { "level": 6,  "title": "Nurse 🏥",                 "salary": 5000,   "upgradeCost": 45000  },
+    { "level": 7,  "title": "Accountant 📊",            "salary": 7000,   "upgradeCost": 60000  },
+    { "level": 8,  "title": "Teacher 📚",               "salary": 9000,   "upgradeCost": 80000  },
+    { "level": 9,  "title": "Software Engineer 💻",     "salary": 12000,  "upgradeCost": 100000 },
+    { "level": 10, "title": "Architect 🏗️",             "salary": 15000,  "upgradeCost": 130000 },
+    { "level": 11, "title": "Doctor 🩺",                "salary": 18000,  "upgradeCost": 170000 },
+    { "level": 12, "title": "Lawyer ⚖️",                "salary": 22000,  "upgradeCost": 220000 },
+    { "level": 13, "title": "Airline Pilot ✈️",          "salary": 27000,  "upgradeCost": 280000 },
+    { "level": 14, "title": "Corporate Director 👔",    "salary": 35000,  "upgradeCost": 350000 },
+    { "level": 15, "title": "CEO 👑",                   "salary": 50000,  "upgradeCost": 500000 }
+  ]
+}
