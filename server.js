@@ -180,6 +180,15 @@ async function getUserProfileFromDb(userId) {
   const row = await querySqlite(sql, [userId])
   if (!row) return null
 
+  const salaryCooldownMs = 0.50 * 60 * 60 * 1000
+  let nextSalaryClaimDate = new Date(Date.now() - 1000).toISOString()
+  if (row.LastSalaryClaimUtc) {
+    const lastClaimStr = row.LastSalaryClaimUtc.endsWith('Z') 
+      ? row.LastSalaryClaimUtc 
+      : row.LastSalaryClaimUtc + 'Z'
+    nextSalaryClaimDate = new Date(new Date(lastClaimStr).getTime() + salaryCooldownMs).toISOString()
+  }
+
   return {
     accountId: row.AccountId,
     id: String(row.UserId),
@@ -193,7 +202,7 @@ async function getUserProfileFromDb(userId) {
     cardTypeName: row.CardTypeName,
     jobLevel: row.JobLevel,
     shieldEndTimeUtc: row.ShieldEndTimeUtc,
-    nextSalaryClaimDate: row.LastSalaryClaimUtc,
+    nextSalaryClaimDate: nextSalaryClaimDate,
     lastSalaryClaimUtc: row.LastSalaryClaimUtc,
     lastTreasureHuntUtc: row.LastTreasureHuntUtc,
     lastWheelSpinUtc: row.LastWheelSpinUtc,
