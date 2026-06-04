@@ -9,7 +9,7 @@ const __dirname = path.dirname(__filename)
 const app = express()
 const PORT = process.env.PORT || 3000
 const usersDbPath = path.join(__dirname, 'db', 'users.db')
-const usersDb = new sqlite3.Database(usersDbPath, sqlite3.OPEN_READONLY, (err) => {
+const usersDb = new sqlite3.Database(usersDbPath, sqlite3.OPEN_READWRITE, (err) => {
   if (err) {
     console.error('Unable to open users.db:', err)
   } else {
@@ -22,6 +22,24 @@ function querySqlite(sql, params = []) {
     usersDb.get(sql, params, (err, row) => {
       if (err) return reject(err)
       resolve(row)
+    })
+  })
+}
+
+function querySqliteAll(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    usersDb.all(sql, params, (err, rows) => {
+      if (err) return reject(err)
+      resolve(rows)
+    })
+  })
+}
+
+function querySqliteRun(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    usersDb.run(sql, params, function (err) {
+      if (err) return reject(err)
+      resolve(this)
     })
   })
 }
@@ -53,19 +71,36 @@ function buildPlayerInfo(jobs, treasures, playerData = null) {
     name: 'Demo Player',
     username: 'guest',
     balance: 1000,
+    accountNumber: null,
+    thief: false,
+    cardTypeId: null,
+    cardTypeName: null,
     jobLevel: 1,
-    shields: 0,
-    inventory: [
-      { emoji: '🪙', name: 'Gold Coins', value: 2000, weight: 15 },
-      { emoji: '📜', name: 'Ancient Scroll', value: 1500, weight: 15 }
-    ]
+    shieldEndTimeUtc: null,
+    nextSalaryClaimDate: new Date(Date.now() - 1000).toISOString(),
+    lastSalaryClaimUtc: null,
+    lastTreasureHuntUtc: null,
+    lastWheelSpinUtc: null,
+    lastInvestUtc: null,
+    lastCoinFlipUtc: null,
+    lastStealUtc: null,
+    lastRaidUtc: null,
+    lastBribeUtc: null,
+    lastBurgerUtc: null,
+    lastRentUpdateUtc: null,
+    unclaimedRent: 0,
+    lastWealthTaxUtc: null,
+    createdAt: null,
+    lastSeen: null,
+    inventory: [],
   }
 
   const source = playerData ?? defaultPlayer
   const job = getJobByLevel(jobs, source.jobLevel)
-  const treasureValue = source.inventory.reduce((sum, item) => sum + (item.value || 0), 0)
-  const shields = source.shieldEndTime
-    ? (new Date(source.shieldEndTime) > new Date() ? 1 : 0)
+  const inventory = Array.isArray(source.inventory) ? source.inventory : []
+  const treasureValue = inventory.reduce((sum, item) => sum + (item.value || 0), 0)
+  const shields = source.shieldEndTimeUtc
+    ? (new Date(source.shieldEndTimeUtc) > new Date() ? 1 : 0)
     : 0
 
   return {
@@ -73,15 +108,32 @@ function buildPlayerInfo(jobs, treasures, playerData = null) {
     name: source.name,
     username: source.username,
     balance: source.balance,
+    accountNumber: source.accountNumber,
+    thief: source.thief,
+    cardTypeId: source.cardTypeId,
+    cardTypeName: source.cardTypeName,
     jobLevel: job.level,
     jobTitle: job.title,
     jobSalary: job.salary,
     shields,
-    nextSalaryClaimDate: source.nextSalaryClaimDate || new Date(Date.now() - 1000).toISOString(),
-    inventory: source.inventory,
+    shieldEndTimeUtc: source.shieldEndTimeUtc,
+    nextSalaryClaimDate: source.nextSalaryClaimDate,
+    lastSalaryClaimUtc: source.lastSalaryClaimUtc,
+    lastTreasureHuntUtc: source.lastTreasureHuntUtc,
+    lastWheelSpinUtc: source.lastWheelSpinUtc,
+    lastInvestUtc: source.lastInvestUtc,
+    lastCoinFlipUtc: source.lastCoinFlipUtc,
+    lastStealUtc: source.lastStealUtc,
+    lastRaidUtc: source.lastRaidUtc,
+    lastBribeUtc: source.lastBribeUtc,
+    lastBurgerUtc: source.lastBurgerUtc,
+    lastRentUpdateUtc: source.lastRentUpdateUtc,
+    unclaimedRent: source.unclaimedRent,
+    lastWealthTaxUtc: source.lastWealthTaxUtc,
+    createdAt: source.createdAt,
+    lastSeen: source.lastSeen,
+    inventory,
     treasureValue,
-    availableJobs: jobs,
-    availableTreasures: treasures
   }
 }
 
@@ -91,29 +143,97 @@ async function getUserProfileFromDb(userId) {
       Accounts.AccountId,
       Accounts.UserId,
       Accounts.Balance,
+      Accounts.AccountNumber,
+      Accounts.Thief,
+      Accounts.CardTypeId,
+      CardTypes.Name AS CardTypeName,
       Accounts.JobLevel,
-      Accounts.ShieldEndTimeUtc,
       Accounts.LastSalaryClaimUtc,
+      Accounts.LastTreasureHuntUtc,
+      Accounts.LastWheelSpinUtc,
+      Accounts.LastInvestUtc,
+      Accounts.LastCoinFlipUtc,
+      Accounts.LastStealUtc,
+      Accounts.LastRaidUtc,
+      Accounts.LastBribeUtc,
+      Accounts.ShieldEndTimeUtc,
+      Accounts.LastBurgerUtc,
+      Accounts.LastRentUpdateUtc,
+      Accounts.UnclaimedRent,
+      Accounts.LastWealthTaxUtc,
       Users.FirstName,
       Users.LastName,
-      Users.Username
+      Users.Username,
+      Users.AccessHash,
+      Users.CreatedAt,
+      Users.LastSeen
     FROM Accounts
     JOIN Users ON Accounts.UserId = Users.UserId
+    LEFT JOIN CardTypes ON Accounts.CardTypeId = CardTypes.Id
     WHERE Accounts.UserId = ?
   `
   const row = await querySqlite(sql, [userId])
   if (!row) return null
 
   return {
+    accountId: row.AccountId,
     id: String(row.UserId),
-    name: [row.FirstName, row.LastName].filter(Boolean).join(' ') || row.Username || `user-${row.UserId}`,
     username: row.Username || `user-${row.UserId}`,
+    name: [row.FirstName, row.LastName].filter(Boolean).join(' ') || row.Username || `user-${row.UserId}`,
+    accessHash: row.AccessHash,
+    accountNumber: row.AccountNumber,
     balance: row.Balance,
+    thief: Boolean(row.Thief),
+    cardTypeId: row.CardTypeId,
+    cardTypeName: row.CardTypeName,
     jobLevel: row.JobLevel,
-    shieldEndTime: row.ShieldEndTimeUtc,
+    shieldEndTimeUtc: row.ShieldEndTimeUtc,
     nextSalaryClaimDate: row.LastSalaryClaimUtc,
+    lastSalaryClaimUtc: row.LastSalaryClaimUtc,
+    lastTreasureHuntUtc: row.LastTreasureHuntUtc,
+    lastWheelSpinUtc: row.LastWheelSpinUtc,
+    lastInvestUtc: row.LastInvestUtc,
+    lastCoinFlipUtc: row.LastCoinFlipUtc,
+    lastStealUtc: row.LastStealUtc,
+    lastRaidUtc: row.LastRaidUtc,
+    lastBribeUtc: row.LastBribeUtc,
+    lastBurgerUtc: row.LastBurgerUtc,
+    lastRentUpdateUtc: row.LastRentUpdateUtc,
+    unclaimedRent: row.UnclaimedRent,
+    lastWealthTaxUtc: row.LastWealthTaxUtc,
+    createdAt: row.CreatedAt,
+    lastSeen: row.LastSeen,
     inventory: [],
   }
+}
+
+async function getInventoryForAccount(accountId) {
+  const sql = `
+    SELECT
+      AccountItems.Id AS accountItemId,
+      AccountItems.PurchasePrice,
+      AccountItems.PurchaseDate,
+      Items.Id AS itemId,
+      Items.ItemName,
+      Items.Price,
+      Items.Rarity,
+      Items.Category
+    FROM AccountItems
+    JOIN Items ON AccountItems.ItemId = Items.Id
+    WHERE AccountItems.AccountId = ?
+  `
+  const rows = await querySqliteAll(sql, [accountId])
+  return rows.map(row => ({
+    accountItemId: row.accountItemId,
+    itemId: row.itemId,
+    name: row.ItemName,
+    price: row.Price,
+    purchasePrice: row.PurchasePrice,
+    purchaseDate: row.PurchaseDate,
+    rarity: row.Rarity,
+    category: row.Category,
+    value: row.Price,
+  }))
 }
 
 app.get('/api/player', async (req, res) => {
@@ -133,11 +253,121 @@ app.get('/api/player/:id', async (req, res) => {
     const jobsData = await loadDbFile('jobs.json')
     const treasuresData = await loadDbFile('treasures.json')
     const playerData = await getUserProfileFromDb(req.params.id)
+    if (!playerData) {
+      return res.status(404).json({ error: 'Player not found' })
+    }
+    const inventory = await getInventoryForAccount(playerData.accountId)
+    playerData.inventory = inventory
     const playerInfo = buildPlayerInfo(jobsData.jobs, treasuresData.treasures, playerData)
     return res.json(playerInfo)
   } catch (error) {
     console.error('Failed to load player info for id', req.params.id, error)
     return res.status(500).json({ error: 'Failed to load player info' })
+  }
+})
+
+app.get('/api/jobs', async (req, res) => {
+  try {
+    const jobsData = await loadDbFile('jobs.json')
+    return res.json(jobsData.jobs)
+  } catch (error) {
+    console.error('Failed to load jobs:', error)
+    return res.status(500).json({ error: 'Failed to load jobs' })
+  }
+})
+
+app.post('/api/player/:id/salary', async (req, res) => {
+  try {
+    const userId = req.params.id
+    const playerData = await getUserProfileFromDb(userId)
+    if (!playerData) return res.status(404).json({ error: 'Player not found' })
+
+    const jobsData = await loadDbFile('jobs.json')
+    const job = getJobByLevel(jobsData.jobs, playerData.jobLevel)
+    
+    // Cooldown check (30 minutes)
+    const cooldownMs = 0.50 * 60 * 60 * 1000
+    const now = new Date()
+    if (playerData.lastSalaryClaimUtc) {
+      // The DB date is typically stored as UTC without 'Z' at the end, so we might need to append it for proper parsing
+      const lastClaimStr = playerData.lastSalaryClaimUtc.endsWith('Z') 
+        ? playerData.lastSalaryClaimUtc 
+        : playerData.lastSalaryClaimUtc + 'Z'
+      const lastClaim = new Date(lastClaimStr)
+      
+      if (now - lastClaim < cooldownMs) {
+        return res.status(400).json({ 
+          error: 'Salary on cooldown', 
+          nextClaimDate: new Date(lastClaim.getTime() + cooldownMs).toISOString() 
+        })
+      }
+    }
+
+    const newBalance = (playerData.balance || 0) + job.salary
+    const newClaimUtc = now.toISOString().replace('T', ' ').substring(0, 19)
+
+    await querySqliteRun(
+      'UPDATE Accounts SET Balance = ?, LastSalaryClaimUtc = ? WHERE UserId = ?',
+      [newBalance, newClaimUtc, userId]
+    )
+
+    return res.json({ 
+      success: true, 
+      balance: newBalance, 
+      amountClaimed: job.salary,
+      nextClaimDate: new Date(now.getTime() + cooldownMs).toISOString(),
+      lastSalaryClaimUtc: newClaimUtc
+    })
+  } catch (error) {
+    console.error('Failed to claim salary:', error)
+    return res.status(500).json({ error: 'Internal Server Error' })
+  }
+})
+
+app.post('/api/player/:id/upgrade', async (req, res) => {
+  try {
+    const userId = req.params.id
+    const playerData = await getUserProfileFromDb(userId)
+    if (!playerData) return res.status(404).json({ error: 'Player not found' })
+
+    const jobsData = await loadDbFile('jobs.json')
+    const currentJobLevel = playerData.jobLevel || 1
+    const maxLevel = Math.max(...jobsData.jobs.map(j => j.level))
+
+    if (currentJobLevel >= maxLevel) {
+      return res.status(400).json({ error: 'Already at max job level' })
+    }
+
+    const nextJob = getJobByLevel(jobsData.jobs, currentJobLevel + 1)
+    if (!nextJob) return res.status(400).json({ error: 'Next job not found' })
+
+    const currentBalance = playerData.balance || 0
+    if (currentBalance < nextJob.upgradeCost) {
+      return res.status(400).json({ 
+        error: 'Insufficient funds', 
+        balance: currentBalance, 
+        upgradeCost: nextJob.upgradeCost 
+      })
+    }
+
+    const newBalance = currentBalance - nextJob.upgradeCost
+    const newJobLevel = nextJob.level
+
+    await querySqliteRun(
+      'UPDATE Accounts SET Balance = ?, JobLevel = ? WHERE UserId = ?',
+      [newBalance, newJobLevel, userId]
+    )
+
+    return res.json({ 
+      success: true, 
+      balance: newBalance, 
+      jobLevel: newJobLevel,
+      jobTitle: nextJob.title,
+      jobSalary: nextJob.salary
+    })
+  } catch (error) {
+    console.error('Failed to upgrade job:', error)
+    return res.status(500).json({ error: 'Internal Server Error' })
   }
 })
 
