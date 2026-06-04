@@ -12,6 +12,7 @@ const __dirname = path.dirname(__filename)
 const app = express()
 const PORT = process.env.PORT || 3000
 const dbDir = process.env.DB_DIR || path.join(__dirname, 'db')
+const jsonDir = process.env.JSON_DIR || (process.env.DB_DIR ? path.join(dbDir, 'Data') : dbDir)
 const usersDbPath = path.join(dbDir, 'users.db')
 const usersDb = new sqlite3.Database(usersDbPath, sqlite3.OPEN_READWRITE, (err) => {
   if (err) {
@@ -60,7 +61,7 @@ app.use((req, res, next) => {
 })
 
 async function loadDbFile(filename) {
-  const filePath = path.join(dbDir, filename)
+  const filePath = path.join(jsonDir, filename)
   const content = await fs.readFile(filePath, 'utf-8')
   return JSON.parse(content)
 }
