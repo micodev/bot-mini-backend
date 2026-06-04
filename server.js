@@ -460,6 +460,87 @@ app.post('/api/player/:id/upgrade', async (req, res) => {
   }
 })
 
+app.post('/api/player/:id/wheel/spin', async (req, res) => {
+  try {
+    const userId = req.params.id
+    const playerData = await getUserProfileFromDb(userId)
+    if (!playerData) return res.status(404).json({ error: 'Player not found' })
+
+    const cooldownHours = 0.10 // matches appsettings.json
+    const cooldownMs = cooldownHours * 60 * 60 * 1000
+    const now = new Date()
+
+    if (playerData.lastWheelSpinUtc) {
+      const lastSpinStr = playerData.lastWheelSpinUtc.endsWith('Z') 
+        ? playerData.lastWheelSpinUtc 
+        : playerData.lastWheelSpinUtc + 'Z'
+      const lastSpin = new Date(lastSpinStr)
+      
+      if (now - lastSpin < cooldownMs) {
+        return res.status(400).json({ 
+          error: 'Wheel on cooldown', 
+          nextSpinDate: new Date(lastSpin.getTime() + cooldownMs).toISOString() 
+        })
+      }
+    }
+
+    const currentBalance = playerData.balance || 0
+    const spinFee = Math.max(500, Math.floor(currentBalance * 0.02))
+
+    if (currentBalance < spinFee) {
+      return res.status(400).json({ 
+        error: 'Insufficient balance to spin', 
+        balance: currentBalance, 
+        spinFee: spinFee 
+      })
+    }
+
+    const wheelSegments = [
+      { emoji: "💎", name: "Jackpot", multiplier: 10, weight: 5 },
+      { emoji: "🤑", name: "Big Win", multiplier: 5, weight: 10 },
+      { emoji: "💰", name: "Nice Win", multiplier: 2, weight: 20 },
+      { emoji: "💵", name: "Small Win", multiplier: 1, weight: 30 },
+      { emoji: "🍀", name: "Lucky", multiplier: 0.5, weight: 25 },
+      { emoji: "💔", name: "Nothing", multiplier: 0, weight: 10 }
+    ];
+
+    const totalWeight = wheelSegments.reduce((sum, seg) => sum + seg.weight, 0);
+    let rand = Math.floor(Math.random() * totalWeight);
+    let resultSegment = wheelSegments[wheelSegments.length - 1];
+
+    for (const segment of wheelSegments) {
+      if (rand < segment.weight) {
+        resultSegment = segment;
+        break;
+      }
+      rand -= segment.weight;
+    }
+
+    const payout = Math.floor(spinFee * resultSegment.multiplier);
+    const newBalance = currentBalance - spinFee + payout;
+    const newSpinUtc = now.toISOString().replace('T', ' ').substring(0, 19)
+
+    await querySqliteRun(
+      'UPDATE Accounts SET Balance = ?, LastWheelSpinUtc = ? WHERE UserId = ?',
+      [newBalance, newSpinUtc, userId]
+    )
+
+    return res.json({ 
+      success: true, 
+      balance: newBalance,
+      spinFee: spinFee,
+      payout: payout,
+      segmentName: resultSegment.name,
+      segmentEmoji: resultSegment.emoji,
+      lastWheelSpinUtc: newSpinUtc,
+      nextSpinDate: new Date(now.getTime() + cooldownMs).toISOString()
+    })
+  } catch (error) {
+    console.error('Failed to spin wheel:', error)
+    return res.status(500).json({ error: 'Internal Server Error' })
+  }
+})
+
 app.get('/', (req, res) => {
   res.send('Bot mini app backend is running. Use /api/player or /api/player/:id')
 })
