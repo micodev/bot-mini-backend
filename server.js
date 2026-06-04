@@ -1,3 +1,4 @@
+import 'dotenv/config'
 import express from 'express'
 import fs from 'fs/promises'
 import fsSync from 'fs'
@@ -10,7 +11,8 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const app = express()
 const PORT = process.env.PORT || 3000
-const usersDbPath = path.join(__dirname, 'db', 'users.db')
+const dbDir = process.env.DB_DIR || path.join(__dirname, 'db')
+const usersDbPath = path.join(dbDir, 'users.db')
 const usersDb = new sqlite3.Database(usersDbPath, sqlite3.OPEN_READWRITE, (err) => {
   if (err) {
     console.error('Unable to open users.db:', err)
@@ -58,7 +60,7 @@ app.use((req, res, next) => {
 })
 
 async function loadDbFile(filename) {
-  const filePath = path.join(__dirname, 'db', filename)
+  const filePath = path.join(dbDir, filename)
   const content = await fs.readFile(filePath, 'utf-8')
   return JSON.parse(content)
 }
