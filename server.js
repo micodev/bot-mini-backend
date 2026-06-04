@@ -6,6 +6,9 @@ import https from 'https'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import sqlite3 from 'sqlite3'
+import http from 'http'
+import { Server } from 'socket.io'
+import { createClient } from 'redis'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -548,18 +551,317 @@ app.get('/', (req, res) => {
 const privKeyPath = '/etc/letsencrypt/live/ibrahim-api.duckdns.org/privkey.pem'
 const fullChainPath = '/etc/letsencrypt/live/ibrahim-api.duckdns.org/fullchain.pem'
 
+let server;
 if (fsSync.existsSync(privKeyPath) && fsSync.existsSync(fullChainPath)) {
   const privateKey = fsSync.readFileSync(privKeyPath, 'utf8')
   const certificate = fsSync.readFileSync(fullChainPath, 'utf8')
   const credentials = { key: privateKey, cert: certificate }
-  const httpsServer = https.createServer(credentials, app)
-  
-  httpsServer.listen(PORT, () => {
-    console.log(`Bot mini app backend is running securely on https://ibrahim-api.duckdns.org`)
-    console.log(`Port: ${PORT}`)
-  })
+  server = https.createServer(credentials, app)
 } else {
-  app.listen(PORT, () => {
-    console.log(`Bot mini app backend is running on http://localhost:${PORT}`)
-  })
+  server = http.createServer(app)
 }
+
+const io = new Server(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST']
+  }
+});
+
+// Redis setup for receiving updates from C# bot
+const redisClient = createClient({
+  url: process.env.REDIS_URL || 'redis://localhost:6379'
+});
+
+redisClient.on('error', (err) => console.error('Redis Client Error', err));
+
+(async () => {
+  try {
+    await redisClient.connect();
+    console.log('Connected to Redis');
+    
+    // Create a subscriber client for pub/sub
+    const subscriber = redisClient.duplicate();
+    await subscriber.connect();
+    
+    await subscriber.subscribe('economy_events', async (message) => {
+      try {
+        const data = JSON.parse(message);
+        const { userId, type, ...payload } = data;
+        if (userId && type) {
+          if (type === 'force_profile_update') {
+            // Fetch latest profile and push to user
+            try {
+              const jobsData = await loadDbFile('jobs.json')
+              const treasuresData = await loadDbFile('treasures.json')
+              const playerData = await getUserProfileFromDb(userId)
+              if (playerData) {
+                const inventory = await getInventoryForAccount(playerData.accountId)
+                playerData.inventory = inventory
+                
+                const rankTierInfo = await getPlayerRankAndTier(userId)
+                playerData.tier = rankTierInfo.tier
+                playerData.tierName = getTierDisplay(rankTierInfo.tier)
+                playerData.rank = rankTierInfo.rank
+
+                const playerInfo = buildPlayerInfo(jobsData.jobs, treasuresData.treasures, playerData)
+                io.to(`user_${userId}`).emit('profile_update', playerInfo);
+              }
+            } catch (err) {
+              console.error('Failed to fetch profile on force_update:', err);
+            }
+          } else {
+            io.to(`user_${userId}`).emit(type, payload);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to parse redis message:', err);
+      }
+    });
+    console.log('Subscribed to Redis channel: economy_events');
+  } catch (err) {
+    console.error('Redis connection failed:', err);
+  }
+})();
+
+io.on('connection', (socket) => {
+  console.log('A user connected:', socket.id);
+  
+  socket.on('join', (userId) => {
+    if (userId) {
+      socket.join(`user_${userId}`);
+      console.log(`Socket ${socket.id} joined room user_${userId}`);
+    }
+  });
+
+  socket.on('get_jobs', async (_, callback) => {
+    if (!callback) return;
+    try {
+      const jobsData = await loadDbFile('jobs.json')
+      callback({ success: true, data: jobsData.jobs })
+    } catch (error) {
+      console.error('Failed to load jobs via socket:', error)
+      callback({ error: 'Failed to load jobs' })
+    }
+  });
+
+  socket.on('request_profile', async (userId, callback) => {
+    if (!callback) return;
+    try {
+      const jobsData = await loadDbFile('jobs.json')
+      const treasuresData = await loadDbFile('treasures.json')
+      const playerData = await getUserProfileFromDb(userId)
+      if (!playerData) {
+        return callback({ error: 'Player not found' })
+      }
+      const inventory = await getInventoryForAccount(playerData.accountId)
+      playerData.inventory = inventory
+      
+      const rankTierInfo = await getPlayerRankAndTier(userId)
+      playerData.tier = rankTierInfo.tier
+      playerData.tierName = getTierDisplay(rankTierInfo.tier)
+      playerData.rank = rankTierInfo.rank
+
+      const playerInfo = buildPlayerInfo(jobsData.jobs, treasuresData.treasures, playerData)
+      callback({ success: true, data: playerInfo })
+    } catch (error) {
+      console.error('Failed to load player info via socket:', error)
+      callback({ error: 'Failed to load player info' })
+    }
+  });
+
+  socket.on('claim_salary', async (userId, callback) => {
+    if (!callback) return;
+    try {
+      const playerData = await getUserProfileFromDb(userId)
+      if (!playerData) return callback({ error: 'Player not found' })
+
+      const jobsData = await loadDbFile('jobs.json')
+      const job = getJobByLevel(jobsData.jobs, playerData.jobLevel)
+      
+      const cooldownMs = 0.50 * 60 * 60 * 1000
+      const now = new Date()
+      if (playerData.lastSalaryClaimUtc) {
+        const lastClaimStr = playerData.lastSalaryClaimUtc.endsWith('Z') 
+          ? playerData.lastSalaryClaimUtc 
+          : playerData.lastSalaryClaimUtc + 'Z'
+        const lastClaim = new Date(lastClaimStr)
+        
+        if (now - lastClaim < cooldownMs) {
+          return callback({ 
+            error: 'Salary on cooldown', 
+            nextClaimDate: new Date(lastClaim.getTime() + cooldownMs).toISOString() 
+          })
+        }
+      }
+
+      const newBalance = (playerData.balance || 0) + job.salary
+      const newClaimUtc = now.toISOString().replace('T', ' ').substring(0, 19)
+
+      await querySqliteRun(
+        'UPDATE Accounts SET Balance = ?, LastSalaryClaimUtc = ? WHERE UserId = ?',
+        [newBalance, newClaimUtc, userId]
+      )
+
+      const payload = { 
+        success: true, 
+        balance: newBalance, 
+        amountClaimed: job.salary,
+        nextClaimDate: new Date(now.getTime() + cooldownMs).toISOString(),
+        lastSalaryClaimUtc: newClaimUtc
+      };
+      
+      // Emit to room as well
+      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, nextSalaryClaimDate: payload.nextClaimDate });
+      
+      callback(payload);
+    } catch (error) {
+      console.error('Failed to claim salary:', error)
+      callback({ error: 'Internal Server Error' })
+    }
+  });
+
+  socket.on('upgrade_job', async (userId, callback) => {
+    if (!callback) return;
+    try {
+      const playerData = await getUserProfileFromDb(userId)
+      if (!playerData) return callback({ error: 'Player not found' })
+
+      const jobsData = await loadDbFile('jobs.json')
+      const currentJobLevel = playerData.jobLevel || 1
+      const maxLevel = Math.max(...jobsData.jobs.map(j => j.level))
+
+      if (currentJobLevel >= maxLevel) {
+        return callback({ error: 'Already at max job level' })
+      }
+
+      const nextJob = getJobByLevel(jobsData.jobs, currentJobLevel + 1)
+      if (!nextJob) return callback({ error: 'Next job not found' })
+
+      const currentBalance = playerData.balance || 0
+      if (currentBalance < nextJob.upgradeCost) {
+        return callback({ 
+          error: 'Insufficient funds', 
+          balance: currentBalance, 
+          upgradeCost: nextJob.upgradeCost 
+        })
+      }
+
+      const newBalance = currentBalance - nextJob.upgradeCost
+      const newJobLevel = nextJob.level
+
+      await querySqliteRun(
+        'UPDATE Accounts SET Balance = ?, JobLevel = ? WHERE UserId = ?',
+        [newBalance, newJobLevel, userId]
+      )
+
+      const payload = { 
+        success: true, 
+        balance: newBalance, 
+        jobLevel: newJobLevel,
+        jobTitle: nextJob.title,
+        jobSalary: nextJob.salary
+      };
+      
+      io.to(`user_${userId}`).emit('profile_update', payload);
+      
+      callback(payload)
+    } catch (error) {
+      console.error('Failed to upgrade job:', error)
+      callback({ error: 'Internal Server Error' })
+    }
+  });
+
+  socket.on('spin_wheel', async (userId, callback) => {
+    if (!callback) return;
+    try {
+      const playerData = await getUserProfileFromDb(userId)
+      if (!playerData) return callback({ error: 'Player not found' })
+
+      const cooldownHours = 0.10
+      const cooldownMs = cooldownHours * 60 * 60 * 1000
+      const now = new Date()
+
+      if (playerData.lastWheelSpinUtc) {
+        const lastSpinStr = playerData.lastWheelSpinUtc.endsWith('Z') 
+          ? playerData.lastWheelSpinUtc 
+          : playerData.lastWheelSpinUtc + 'Z'
+        const lastSpin = new Date(lastSpinStr)
+        
+        if (now - lastSpin < cooldownMs) {
+          return callback({ 
+            error: 'Wheel on cooldown', 
+            nextSpinDate: new Date(lastSpin.getTime() + cooldownMs).toISOString() 
+          })
+        }
+      }
+
+      const currentBalance = playerData.balance || 0
+      const spinFee = Math.max(500, Math.floor(currentBalance * 0.02))
+
+      if (currentBalance < spinFee) {
+        return callback({ 
+          error: 'Insufficient balance to spin', 
+          balance: currentBalance, 
+          spinFee: spinFee 
+        })
+      }
+
+      const wheelSegments = [
+        { emoji: "💎", name: "Jackpot", multiplier: 10, weight: 5 },
+        { emoji: "🤑", name: "Big Win", multiplier: 5, weight: 10 },
+        { emoji: "💰", name: "Nice Win", multiplier: 2, weight: 20 },
+        { emoji: "💵", name: "Small Win", multiplier: 1, weight: 30 },
+        { emoji: "🍀", name: "Lucky", multiplier: 0.5, weight: 25 },
+        { emoji: "💔", name: "Nothing", multiplier: 0, weight: 10 }
+      ];
+
+      const totalWeight = wheelSegments.reduce((sum, seg) => sum + seg.weight, 0);
+      let rand = Math.floor(Math.random() * totalWeight);
+      let resultSegment = wheelSegments[wheelSegments.length - 1];
+
+      for (const segment of wheelSegments) {
+        if (rand < segment.weight) {
+          resultSegment = segment;
+          break;
+        }
+        rand -= segment.weight;
+      }
+
+      const payout = Math.floor(spinFee * resultSegment.multiplier);
+      const newBalance = currentBalance - spinFee + payout;
+      const newSpinUtc = now.toISOString().replace('T', ' ').substring(0, 19)
+
+      await querySqliteRun(
+        'UPDATE Accounts SET Balance = ?, LastWheelSpinUtc = ? WHERE UserId = ?',
+        [newBalance, newSpinUtc, userId]
+      )
+
+      const payload = { 
+        success: true, 
+        balance: newBalance,
+        spinFee: spinFee,
+        payout: payout,
+        segmentName: resultSegment.name,
+        segmentEmoji: resultSegment.emoji,
+        lastWheelSpinUtc: newSpinUtc,
+        nextSpinDate: new Date(now.getTime() + cooldownMs).toISOString()
+      };
+      
+      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, lastWheelSpinUtc: newSpinUtc });
+      
+      callback(payload)
+    } catch (error) {
+      console.error('Failed to spin wheel:', error)
+      callback({ error: 'Internal Server Error' })
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log('User disconnected:', socket.id);
+  });
+});
+
+server.listen(PORT, () => {
+  console.log(`Bot mini app backend socket/http server is running on port ${PORT}`)
+})
