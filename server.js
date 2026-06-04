@@ -29,11 +29,11 @@ function getJobByLevel(jobs, level) {
   return jobs.find(job => job.level === level) || jobs[0]
 }
 
-function buildPlayerInfo(jobs, treasures) {
+function buildPlayerInfo(jobs, treasures, playerId = null) {
   const defaultPlayer = {
     id: 'demo-player-1',
     name: 'Demo Player',
-    username: 'guest',
+    username: playerId ? `user-${playerId}` : 'guest',
     balance: 1000,
     jobLevel: 1,
     shields: 0,
@@ -79,7 +79,7 @@ app.get('/api/player/:id', async (req, res) => {
   try {
     const jobsData = await loadDbFile('jobs.json')
     const treasuresData = await loadDbFile('treasures.json')
-    const playerInfo = buildPlayerInfo(jobsData.jobs, treasuresData.treasures)
+    const playerInfo = buildPlayerInfo(jobsData.jobs, treasuresData.treasures, req.params.id)
     playerInfo.id = req.params.id
     return res.json(playerInfo)
   } catch (error) {
