@@ -1,5 +1,7 @@
 import express from 'express'
 import fs from 'fs/promises'
+import fsSync from 'fs'
+import https from 'https'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import sqlite3 from 'sqlite3'
@@ -375,6 +377,21 @@ app.get('/', (req, res) => {
   res.send('Bot mini app backend is running. Use /api/player or /api/player/:id')
 })
 
-app.listen(PORT, () => {
-  console.log(`Bot mini app backend is running on http://localhost:${PORT}`)
-})
+const privKeyPath = '/etc/letsencrypt/live/ibrahim-api.duckdns.org/privkey.pem'
+const fullChainPath = '/etc/letsencrypt/live/ibrahim-api.duckdns.org/fullchain.pem'
+
+if (fsSync.existsSync(privKeyPath) && fsSync.existsSync(fullChainPath)) {
+  const privateKey = fsSync.readFileSync(privKeyPath, 'utf8')
+  const certificate = fsSync.readFileSync(fullChainPath, 'utf8')
+  const credentials = { key: privateKey, cert: certificate }
+  const httpsServer = https.createServer(credentials, app)
+  
+  httpsServer.listen(PORT, () => {
+    console.log(`Bot mini app backend is running securely on https://ibrahim-api.duckdns.org`)
+    console.log(`Port: ${PORT}`)
+  })
+} else {
+  app.listen(PORT, () => {
+    console.log(`Bot mini app backend is running on http://localhost:${PORT}`)
+  })
+}
