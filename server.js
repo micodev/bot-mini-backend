@@ -70,6 +70,72 @@ function getJobByLevel(jobs, level) {
   return jobs.find(job => job.level === level) || jobs[0]
 }
 
+function getTierDisplay(tier) {
+  switch(tier) {
+    case 0: return "👑 Emperor";
+    case 1: return "💎 King";
+    case 2: return "🥈 Prince";
+    case 3: return "🥉 Duke";
+    case 4: return "🎖️ Baron";
+    case 5: return "🔰 Commoner";
+    default: return "🔰 Commoner";
+  }
+}
+
+async function getPlayerRankAndTier(userId) {
+  if (String(userId) === '622676944') {
+    return { tier: 0, rank: 1 };
+  }
+
+  const sql = `
+    WITH UserNetWorths AS (
+        SELECT a.UserId, 
+               a.Balance + COALESCE((
+                   SELECT SUM(CAST(ROUND(i.Price * COALESCE(mp.Multiplier, 1.0) / 1000.0) AS INTEGER) * 1000)
+                   FROM AccountItems ai 
+                   JOIN Items i ON ai.ItemId = i.Id 
+                   LEFT JOIN MarketPrices mp ON i.Category = mp.Category 
+                   WHERE ai.AccountId = a.AccountId
+               ), 0) as NetWorth
+        FROM Accounts a
+        WHERE a.UserId != 622676944
+    )
+    SELECT 
+        (SELECT COUNT(*) FROM UserNetWorths) AS total,
+        (SELECT COUNT(*) FROM UserNetWorths WHERE NetWorth < (SELECT NetWorth FROM UserNetWorths WHERE UserId = ?)) AS strictLess,
+        (SELECT COUNT(*) FROM UserNetWorths WHERE NetWorth = (SELECT NetWorth FROM UserNetWorths WHERE UserId = ?)) AS equal,
+        (SELECT COUNT(*) FROM UserNetWorths WHERE NetWorth > (SELECT NetWorth FROM UserNetWorths WHERE UserId = ?)) AS strictGreater
+  `;
+
+  try {
+    const row = await querySqlite(sql, [userId, userId, userId]);
+    if (!row || row.total === 0) {
+      return { tier: 5, rank: 1 };
+    }
+    
+    const total = row.total;
+    const strictLess = row.strictLess;
+    const equal = row.equal;
+    const strictGreater = row.strictGreater;
+
+    // Tie-breaking logic: rank the users with same balance in the middle of their group
+    const percentile = (strictLess + 0.5 * equal) / total;
+    
+    let tier = 5;
+    if (percentile >= 0.95) tier = 1;
+    else if (percentile >= 0.85) tier = 2;
+    else if (percentile >= 0.70) tier = 3;
+    else if (percentile >= 0.50) tier = 4;
+
+    const rank = strictGreater + 1; // 1-based rank
+
+    return { tier, rank };
+  } catch (err) {
+    console.error("Failed to get rank and tier:", err);
+    return { tier: 5, rank: -1 };
+  }
+}
+
 function buildPlayerInfo(jobs, treasures, playerData = null) {
   const defaultPlayer = {
     id: 'demo-player-1',
@@ -120,6 +186,9 @@ function buildPlayerInfo(jobs, treasures, playerData = null) {
     jobLevel: job.level,
     jobTitle: job.title,
     jobSalary: job.salary,
+    tier: source.tier ?? 5,
+    tierName: source.tierName ?? "🔰 Commoner",
+    rank: source.rank ?? -1,
     shields,
     shieldEndTimeUtc: source.shieldEndTimeUtc,
     nextSalaryClaimDate: source.nextSalaryClaimDate,
@@ -272,6 +341,12 @@ app.get('/api/player/:id', async (req, res) => {
     }
     const inventory = await getInventoryForAccount(playerData.accountId)
     playerData.inventory = inventory
+    
+    const rankTierInfo = await getPlayerRankAndTier(req.params.id)
+    playerData.tier = rankTierInfo.tier
+    playerData.tierName = getTierDisplay(rankTierInfo.tier)
+    playerData.rank = rankTierInfo.rank
+
     const playerInfo = buildPlayerInfo(jobsData.jobs, treasuresData.treasures, playerData)
     return res.json(playerInfo)
   } catch (error) {
