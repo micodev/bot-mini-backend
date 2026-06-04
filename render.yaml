@@ -1,0 +1,9 @@
+services:
+  - type: web_service
+    name: bot-mini-app-backend
+    env: node
+    plan: starter
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true

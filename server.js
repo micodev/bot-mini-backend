@@ -79,6 +79,10 @@ app.get('/api/player/:id', async (req, res) => {
   }
 })
 
+app.get('/', (req, res) => {
+  res.send('Bot mini app backend is running. Use /api/player or /api/player/:id')
+})
+
 app.listen(PORT, () => {
   console.log(`Bot mini app backend is running on http://localhost:${PORT}`)
 })
