@@ -624,12 +624,15 @@ redisClient.on('error', (err) => console.error('Redis Client Error', err));
   }
 })();
 
+const connectedUsers = new Map(); // socket.id -> userId
+
 io.on('connection', (socket) => {
   console.log('A user connected:', socket.id);
   
   socket.on('join', (userId) => {
     if (userId) {
       socket.join(`user_${userId}`);
+      connectedUsers.set(socket.id, userId);
       console.log(`Socket ${socket.id} joined room user_${userId}`);
     }
   });
@@ -857,10 +860,83 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('buy_burger', async (userId, callback) => {
+    if (!callback) return;
+    try {
+      const playerData = await getUserProfileFromDb(userId);
+      if (!playerData) return callback({ error: 'Player not found' });
+      
+      const burgerCost = 10;
+      if ((playerData.balance || 0) < burgerCost) {
+        return callback({ error: 'Insufficient funds for a cheeseburger' });
+      }
+
+      const newBalance = playerData.balance - burgerCost;
+      const nowUtc = new Date().toISOString().replace('T', ' ').substring(0, 19);
+
+      await querySqliteRun(
+        'UPDATE Accounts SET Balance = ?, LastBurgerUtc = ? WHERE UserId = ?',
+        [newBalance, nowUtc, userId]
+      );
+
+      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, lastBurgerUtc: nowUtc });
+      callback({ success: true, balance: newBalance });
+    } catch (error) {
+      console.error('Failed to buy burger:', error);
+      callback({ error: 'Internal Server Error' });
+    }
+  });
+
+  socket.on('claim_rent', async (userId, callback) => {
+    if (!callback) return;
+    try {
+      const playerData = await getUserProfileFromDb(userId);
+      if (!playerData) return callback({ error: 'Player not found' });
+      
+      const rentToClaim = playerData.unclaimedRent || 0;
+      if (rentToClaim <= 0) {
+        return callback({ error: 'No rent to claim' });
+      }
+
+      const newBalance = (playerData.balance || 0) + rentToClaim;
+      const nowUtc = new Date().toISOString().replace('T', ' ').substring(0, 19);
+
+      await querySqliteRun(
+        'UPDATE Accounts SET Balance = ?, UnclaimedRent = 0, LastRentUpdateUtc = ? WHERE UserId = ?',
+        [newBalance, nowUtc, userId]
+      );
+
+      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, unclaimedRent: 0, lastRentUpdateUtc: nowUtc });
+      callback({ success: true, balance: newBalance, claimedAmount: rentToClaim });
+    } catch (error) {
+      console.error('Failed to claim rent:', error);
+      callback({ error: 'Internal Server Error' });
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
+    connectedUsers.delete(socket.id);
   });
 });
+
+setInterval(async () => {
+  const uniqueUsers = [...new Set(connectedUsers.values())];
+  for (const userId of uniqueUsers) {
+    try {
+      const row = await querySqlite('SELECT UnclaimedRent, LastRentUpdateUtc FROM Accounts WHERE UserId = ?', [userId]);
+      if (row) {
+        const lastUpdateStr = row.LastRentUpdateUtc ? (row.LastRentUpdateUtc.endsWith('Z') ? row.LastRentUpdateUtc : row.LastRentUpdateUtc + 'Z') : new Date().toISOString();
+        const lastUpdate = new Date(lastUpdateStr).getTime();
+        const secondsPassed = Math.floor((Date.now() - lastUpdate) / 1000);
+        const rentRatePerSecond = 1; // $1 per second base rate for demo
+        let newRent = (row.UnclaimedRent || 0) + (secondsPassed > 0 ? secondsPassed * rentRatePerSecond : 0);
+        
+        io.to(`user_${userId}`).emit('rent_update', { unclaimedRent: newRent });
+      }
+    } catch (err) { }
+  }
+}, 3000);
 
 server.listen(PORT, () => {
   console.log(`Bot mini app backend socket/http server is running on port ${PORT}`)
