@@ -925,6 +925,58 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('flip_coin', async ({userId, wager}, callback) => {
+    if (!callback) return;
+    try {
+      const playerData = await getUserProfileFromDb(userId);
+      if (!playerData) return callback({ error: 'Player not found' });
+      
+      const cooldownHours = 0.05; // 3 minutes
+      const cooldownMs = cooldownHours * 60 * 60 * 1000;
+      const now = new Date();
+
+      if (playerData.lastCoinFlipUtc) {
+        const lastFlipStr = playerData.lastCoinFlipUtc.endsWith('Z') 
+          ? playerData.lastCoinFlipUtc 
+          : playerData.lastCoinFlipUtc + 'Z';
+        const lastFlip = new Date(lastFlipStr);
+        
+        if (now - lastFlip < cooldownMs) {
+          return callback({ 
+            error: 'Coin flip on cooldown', 
+            nextFlipDate: new Date(lastFlip.getTime() + cooldownMs).toISOString() 
+          });
+        }
+      }
+
+      const currentBalance = playerData.balance || 0;
+      if (typeof wager !== 'number' || wager <= 0 || !Number.isInteger(wager)) {
+        return callback({ error: 'Invalid wager amount' });
+      }
+      
+      if (currentBalance < wager) {
+        return callback({ error: 'Insufficient balance' });
+      }
+
+      // 48% win chance matching C# bot
+      const isWin = Math.random() < 0.48;
+      const delta = isWin ? wager : -wager;
+      const newBalance = currentBalance + delta;
+      const nowUtc = now.toISOString().replace('T', ' ').substring(0, 19);
+
+      await querySqliteRun(
+        'UPDATE Accounts SET Balance = ?, LastCoinFlipUtc = ? WHERE UserId = ?',
+        [newBalance, nowUtc, userId]
+      );
+
+      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, lastCoinFlipUtc: nowUtc });
+      callback({ success: true, balance: newBalance, isWin, delta, nextFlipDate: new Date(now.getTime() + cooldownMs).toISOString() });
+    } catch (error) {
+      console.error('Failed to flip coin:', error);
+      callback({ error: 'Internal Server Error' });
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
     connectedUsers.delete(socket.id);
