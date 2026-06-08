@@ -893,7 +893,18 @@ io.on('connection', (socket) => {
       const playerData = await getUserProfileFromDb(userId);
       if (!playerData) return callback({ error: 'Player not found' });
       
-      const rentToClaim = playerData.unclaimedRent || 0;
+      const row = await querySqlite('SELECT UnclaimedRent, LastRentUpdateUtc FROM Accounts WHERE UserId = ?', [userId]);
+      let rentToClaim = 0;
+      if (row) {
+        const lastUpdateStr = row.LastRentUpdateUtc ? (row.LastRentUpdateUtc.endsWith('Z') ? row.LastRentUpdateUtc : row.LastRentUpdateUtc + 'Z') : new Date().toISOString();
+        const lastUpdate = new Date(lastUpdateStr).getTime();
+        const secondsPassed = Math.floor((Date.now() - lastUpdate) / 1000);
+        const rentRatePerSecond = 1; // $1 per second base rate for demo
+        rentToClaim = (row.UnclaimedRent || 0) + (secondsPassed > 0 ? secondsPassed * rentRatePerSecond : 0);
+      } else {
+        rentToClaim = playerData.unclaimedRent || 0;
+      }
+
       if (rentToClaim <= 0) {
         return callback({ error: 'No rent to claim' });
       }
