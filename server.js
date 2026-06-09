@@ -866,7 +866,7 @@ io.on('connection', (socket) => {
       const playerData = await getUserProfileFromDb(userId);
       if (!playerData) return callback({ error: 'Player not found' });
       
-      const burgerCost = 10;
+      const burgerCost = 3;
       if ((playerData.balance || 0) < burgerCost) {
         return callback({ error: 'Insufficient funds for a cheeseburger' });
       }
