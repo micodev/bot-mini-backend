@@ -323,7 +323,7 @@ async function getInventoryForAccount(accountId) {
 }
 
 const MARKET_CATEGORIES = ["Real Estate", "Vehicles", "Private Jets", "Jewelry", "Adult Toys", "Nightlife", "Sexy Clothing"];
-const RENT_YIELD_PER_MINUTE = parseFloat(process.env.RENT_YIELD_PER_MINUTE || 0.0003);
+const RENT_YIELD_PER_MINUTE = parseFloat(process.env.RENT_YIELD_PER_MINUTE || 0.00005);
 const WEALTH_TAX_PERCENTAGE = parseFloat(process.env.WEALTH_TAX_PERCENTAGE || 0.02);
 const WEALTH_TAX_COOLDOWN_HOURS = parseFloat(process.env.WEALTH_TAX_COOLDOWN_HOURS || 24);
 
@@ -999,6 +999,51 @@ io.on('connection', (socket) => {
       callback(responsePayload);
     } catch (error) {
       console.error('Failed to claim rent:', error);
+      callback({ error: 'Internal Server Error' });
+    }
+  });
+
+  socket.on('spin_slots', async ({userId, wager}, callback) => {
+    if (!callback) return;
+    try {
+      const playerData = await getUserProfileFromDb(userId);
+      if (!playerData) return callback({ error: 'Player not found' });
+      
+      const currentBalance = playerData.balance || 0;
+      if (typeof wager !== 'number' || wager <= 0 || !Number.isInteger(wager)) {
+        return callback({ error: 'Invalid wager amount' });
+      }
+      
+      if (currentBalance < wager) {
+        return callback({ error: 'Insufficient balance' });
+      }
+
+      const symbols = ['🍒', '🍋', '🍉', '⭐', '💎', '7️⃣'];
+      const slot1 = symbols[Math.floor(Math.random() * symbols.length)];
+      const slot2 = symbols[Math.floor(Math.random() * symbols.length)];
+      const slot3 = symbols[Math.floor(Math.random() * symbols.length)];
+
+      const isWin = (slot1 === slot2 && slot2 === slot3);
+      let multiplier = 0;
+      if (isWin) {
+        if (slot1 === '7️⃣') multiplier = 10;
+        else if (slot1 === '💎') multiplier = 5;
+        else multiplier = 3;
+      }
+
+      const payout = isWin ? wager * multiplier : 0;
+      const delta = isWin ? payout - wager : -wager;
+      const newBalance = currentBalance + delta;
+      
+      await querySqliteRun(
+        'UPDATE Accounts SET Balance = ? WHERE UserId = ?',
+        [newBalance, userId]
+      );
+
+      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance });
+      callback({ success: true, balance: newBalance, isWin, payout, delta, resultSlots: [slot1, slot2, slot3] });
+    } catch (error) {
+      console.error('Failed to spin slots:', error);
       callback({ error: 'Internal Server Error' });
     }
   });
