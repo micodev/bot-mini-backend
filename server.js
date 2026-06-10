@@ -323,7 +323,9 @@ async function getInventoryForAccount(accountId) {
 }
 
 const MARKET_CATEGORIES = ["Real Estate", "Vehicles", "Private Jets", "Jewelry", "Adult Toys", "Nightlife", "Sexy Clothing"];
-const RENT_YIELD_PER_MINUTE = 0.0003;
+const RENT_YIELD_PER_MINUTE = parseFloat(process.env.RENT_YIELD_PER_MINUTE || 0.0003);
+const WEALTH_TAX_PERCENTAGE = parseFloat(process.env.WEALTH_TAX_PERCENTAGE || 0.02);
+const WEALTH_TAX_COOLDOWN_HOURS = parseFloat(process.env.WEALTH_TAX_COOLDOWN_HOURS || 24);
 
 async function getPendingRentExact(userId) {
   const account = await querySqlite('SELECT UnclaimedRent, LastRentUpdateUtc FROM Accounts WHERE UserId = ?', [userId]);
@@ -952,16 +954,49 @@ io.on('connection', (socket) => {
         return callback({ error: 'No rent to claim' });
       }
 
-      const newBalance = (playerData.balance || 0) + rentToClaim;
+      let newBalance = (playerData.balance || 0) + rentToClaim;
       const nowUtc = new Date().toISOString().replace('T', ' ').substring(0, 19);
 
+      // Wealth Tax Logic
+      let taxDeducted = 0;
+      const cooldownMs = WEALTH_TAX_COOLDOWN_HOURS * 60 * 60 * 1000;
+      const lastTaxMs = playerData.lastWealthTaxUtc ? new Date(playerData.lastWealthTaxUtc.endsWith('Z') ? playerData.lastWealthTaxUtc : playerData.lastWealthTaxUtc + 'Z').getTime() : 0;
+      const nowMs = Date.now();
+
+      let newLastWealthTaxUtc = playerData.lastWealthTaxUtc;
+
+      if (nowMs - lastTaxMs >= cooldownMs) {
+        const sqlItemsValue = `
+          SELECT COALESCE(SUM(CAST(ROUND(i.Price * COALESCE(mp.Multiplier, 1.0) / 1000.0) AS INTEGER) * 1000), 0) as TotalItemValue
+          FROM AccountItems ai 
+          JOIN Items i ON ai.ItemId = i.Id 
+          LEFT JOIN MarketPrices mp ON i.Category = mp.Category 
+          WHERE ai.AccountId = ?
+        `;
+        const itemValRow = await querySqlite(sqlItemsValue, [playerData.accountId]);
+        const totalItemValue = itemValRow ? itemValRow.TotalItemValue : 0;
+
+        if (totalItemValue > 0) {
+          taxDeducted = Math.floor(totalItemValue * WEALTH_TAX_PERCENTAGE);
+          newBalance -= taxDeducted;
+          newLastWealthTaxUtc = nowUtc;
+        } else {
+          newLastWealthTaxUtc = nowUtc;
+        }
+      }
+
       await querySqliteRun(
-        'UPDATE Accounts SET Balance = ?, UnclaimedRent = 0, LastRentUpdateUtc = ? WHERE UserId = ?',
-        [newBalance, nowUtc, userId]
+        'UPDATE Accounts SET Balance = ?, UnclaimedRent = 0, LastRentUpdateUtc = ?, LastWealthTaxUtc = ? WHERE UserId = ?',
+        [newBalance, nowUtc, newLastWealthTaxUtc, userId]
       );
 
-      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, unclaimedRent: 0, lastRentUpdateUtc: nowUtc });
-      callback({ success: true, balance: newBalance, claimedAmount: rentToClaim });
+      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, unclaimedRent: 0, lastRentUpdateUtc: nowUtc, lastWealthTaxUtc: newLastWealthTaxUtc });
+      
+      const responsePayload = { success: true, balance: newBalance, claimedAmount: rentToClaim };
+      if (taxDeducted > 0) {
+        responsePayload.taxDeducted = taxDeducted;
+      }
+      callback(responsePayload);
     } catch (error) {
       console.error('Failed to claim rent:', error);
       callback({ error: 'Internal Server Error' });
