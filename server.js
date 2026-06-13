@@ -521,6 +521,11 @@ app.post('/api/player/:id/salary', async (req, res) => {
       }
     }
 
+    const energyResult = await consumeEnergy(userId, 2);
+    if (!energyResult.success) {
+      return res.status(400).json({ error: `Not enough energy. Need 2 ⚡ (Current: ${energyResult.currentEnergy})` });
+    }
+
     const newBalance = (playerData.balance || 0) + job.salary
     const newClaimUtc = now.toISOString().replace('T', ' ').substring(0, 19)
 
@@ -534,7 +539,8 @@ app.post('/api/player/:id/salary', async (req, res) => {
       balance: newBalance, 
       amountClaimed: job.salary,
       nextClaimDate: new Date(now.getTime() + cooldownMs).toISOString(),
-      lastSalaryClaimUtc: newClaimUtc
+      lastSalaryClaimUtc: newClaimUtc,
+      energy: energyResult.finalEnergy
     })
   } catch (error) {
     console.error('Failed to claim salary:', error)
@@ -624,6 +630,11 @@ app.post('/api/player/:id/wheel/spin', async (req, res) => {
       })
     }
 
+    const energyResult = await consumeEnergy(userId, 2);
+    if (!energyResult.success) {
+      return res.status(400).json({ error: `Not enough energy. Need 2 ⚡ (Current: ${energyResult.currentEnergy})` });
+    }
+
     const wheelSegments = [
       { emoji: "💎", name: "Jackpot", multiplier: 10, weight: 5 },
       { emoji: "🤑", name: "Big Win", multiplier: 5, weight: 10 },
@@ -662,7 +673,8 @@ app.post('/api/player/:id/wheel/spin', async (req, res) => {
       segmentName: resultSegment.name,
       segmentEmoji: resultSegment.emoji,
       lastWheelSpinUtc: newSpinUtc,
-      nextSpinDate: new Date(now.getTime() + cooldownMs).toISOString()
+      nextSpinDate: new Date(now.getTime() + cooldownMs).toISOString(),
+      energy: energyResult.finalEnergy
     })
   } catch (error) {
     console.error('Failed to spin wheel:', error)
@@ -825,6 +837,11 @@ io.on('connection', (socket) => {
         }
       }
 
+      const energyResult = await consumeEnergy(userId, 2);
+      if (!energyResult.success) {
+        return callback({ error: `Not enough energy. Need 2 ⚡ (Current: ${energyResult.currentEnergy})` });
+      }
+
       const newBalance = (playerData.balance || 0) + job.salary
       const newClaimUtc = now.toISOString().replace('T', ' ').substring(0, 19)
 
@@ -838,11 +855,12 @@ io.on('connection', (socket) => {
         balance: newBalance, 
         amountClaimed: job.salary,
         nextClaimDate: new Date(now.getTime() + cooldownMs).toISOString(),
-        lastSalaryClaimUtc: newClaimUtc
+        lastSalaryClaimUtc: newClaimUtc,
+        energy: energyResult.finalEnergy
       };
       
       // Emit to room as well
-      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, nextSalaryClaimDate: payload.nextClaimDate });
+      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, nextSalaryClaimDate: payload.nextClaimDate, energy: energyResult.finalEnergy });
       
       callback(payload);
     } catch (error) {
@@ -937,6 +955,11 @@ io.on('connection', (socket) => {
         })
       }
 
+      const energyResult = await consumeEnergy(userId, 2);
+      if (!energyResult.success) {
+        return callback({ error: `Not enough energy. Need 2 ⚡ (Current: ${energyResult.currentEnergy})` });
+      }
+
       const wheelSegments = [
         { emoji: "💎", name: "Jackpot", multiplier: 10, weight: 5 },
         { emoji: "🤑", name: "Big Win", multiplier: 5, weight: 10 },
@@ -975,10 +998,11 @@ io.on('connection', (socket) => {
         segmentName: resultSegment.name,
         segmentEmoji: resultSegment.emoji,
         lastWheelSpinUtc: newSpinUtc,
-        nextSpinDate: new Date(now.getTime() + cooldownMs).toISOString()
+        nextSpinDate: new Date(now.getTime() + cooldownMs).toISOString(),
+        energy: energyResult.finalEnergy
       };
       
-      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, lastWheelSpinUtc: newSpinUtc });
+      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, lastWheelSpinUtc: newSpinUtc, energy: energyResult.finalEnergy });
       
       callback(payload)
     } catch (error) {
@@ -1214,6 +1238,11 @@ io.on('connection', (socket) => {
         return callback({ error: 'Insufficient balance' });
       }
 
+      const energyResult = await consumeEnergy(userId, 1);
+      if (!energyResult.success) {
+        return callback({ error: `Not enough energy. Need 1 ⚡ (Current: ${energyResult.currentEnergy})` });
+      }
+
       // 48% win chance matching C# bot
       const isWin = Math.random() < 0.48;
       const delta = isWin ? wager : -wager;
@@ -1225,8 +1254,8 @@ io.on('connection', (socket) => {
         [newBalance, nowUtc, userId]
       );
 
-      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, lastCoinFlipUtc: nowUtc });
-      callback({ success: true, balance: newBalance, isWin, delta, nextFlipDate: new Date(now.getTime() + cooldownMs).toISOString() });
+      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, lastCoinFlipUtc: nowUtc, energy: energyResult.finalEnergy });
+      callback({ success: true, balance: newBalance, isWin, delta, nextFlipDate: new Date(now.getTime() + cooldownMs).toISOString(), energy: energyResult.finalEnergy });
     } catch (error) {
       console.error('Failed to flip coin:', error);
       callback({ error: 'Internal Server Error' });
