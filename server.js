@@ -328,7 +328,7 @@ const WEALTH_TAX_PERCENTAGE = parseFloat(process.env.WEALTH_TAX_PERCENTAGE || 0.
 const WEALTH_TAX_COOLDOWN_HOURS = parseFloat(process.env.WEALTH_TAX_COOLDOWN_HOURS || 24);
 
 async function getPendingRentExact(userId) {
-  const account = await querySqlite('SELECT UnclaimedRent, LastRentUpdateUtc FROM Accounts WHERE UserId = ?', [userId]);
+  const account = await querySqlite('SELECT UnclaimedRent, LastRentUpdateUtc, Balance FROM Accounts WHERE UserId = ?', [userId]);
   if (!account) return 0;
   
   let lastRentUpdateMs = account.LastRentUpdateUtc ? new Date(account.LastRentUpdateUtc.endsWith('Z') ? account.LastRentUpdateUtc : account.LastRentUpdateUtc + 'Z').getTime() : 0;
@@ -368,9 +368,11 @@ async function getPendingRentExact(userId) {
   
   let newRent = (account.UnclaimedRent || 0) + totalRentGenerated;
   
-  const maxVaultLimit = 250000;
-  if (newRent > maxVaultLimit) {
-    newRent = maxVaultLimit;
+  const maxVaultLimit = 1000000;
+  if ((account.Balance || 0) >= 1000000) {
+    if (newRent > maxVaultLimit) {
+      newRent = maxVaultLimit;
+    }
   }
   
   return newRent;
@@ -914,32 +916,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('buy_burger', async (userId, callback) => {
-    if (!callback) return;
-    try {
-      const playerData = await getUserProfileFromDb(userId);
-      if (!playerData) return callback({ error: 'Player not found' });
-      
-      const burgerCost = 3;
-      if ((playerData.balance || 0) < burgerCost) {
-        return callback({ error: 'Insufficient funds for a cheeseburger' });
-      }
 
-      const newBalance = playerData.balance - burgerCost;
-      const nowUtc = new Date().toISOString().replace('T', ' ').substring(0, 19);
-
-      await querySqliteRun(
-        'UPDATE Accounts SET Balance = ?, LastBurgerUtc = ? WHERE UserId = ?',
-        [newBalance, nowUtc, userId]
-      );
-
-      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, lastBurgerUtc: nowUtc });
-      callback({ success: true, balance: newBalance });
-    } catch (error) {
-      console.error('Failed to buy burger:', error);
-      callback({ error: 'Internal Server Error' });
-    }
-  });
 
   socket.on('claim_rent', async (userId, callback) => {
     if (!callback) return;
