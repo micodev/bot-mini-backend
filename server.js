@@ -139,6 +139,49 @@ async function getPlayerRankAndTier(userId) {
   }
 }
 
+async function consumeEnergy(userId, amount) {
+  const account = await querySqlite('SELECT Energy, LastEnergyRegenUtc FROM Accounts WHERE UserId = ?', [userId]);
+  if (!account) return { success: false, error: 'Player not found' };
+
+  let currentEnergy = account.Energy ?? 20;
+  let lastRegenUtc = account.LastEnergyRegenUtc;
+  const maxEnergy = 20;
+  const regenPerHour = 5;
+
+  let newRegenTime = lastRegenUtc ? new Date(lastRegenUtc.endsWith('Z') ? lastRegenUtc : lastRegenUtc + 'Z') : new Date();
+
+  if (currentEnergy < maxEnergy && lastRegenUtc) {
+    const lastTime = newRegenTime.getTime();
+    const now = Date.now();
+    const diffMs = now - lastTime;
+    if (diffMs > 0) {
+      const elapsedHours = diffMs / (1000 * 60 * 60);
+      const energyToAdd = Math.floor(elapsedHours * regenPerHour);
+      if (energyToAdd > 0) {
+        currentEnergy = Math.min(maxEnergy, currentEnergy + energyToAdd);
+        const minutesPerEnergy = 60.0 / regenPerHour;
+        newRegenTime = new Date(lastTime + (energyToAdd * minutesPerEnergy * 60 * 1000));
+      }
+    }
+  } else if (currentEnergy >= maxEnergy) {
+    newRegenTime = new Date();
+  }
+
+  if (currentEnergy < amount) {
+    return { success: false, error: 'Not enough energy', currentEnergy };
+  }
+
+  const finalEnergy = currentEnergy - amount;
+  const newRegenTimeStr = newRegenTime.toISOString().replace('T', ' ').substring(0, 19);
+
+  await querySqliteRun(
+    'UPDATE Accounts SET Energy = ?, LastEnergyRegenUtc = ? WHERE UserId = ?',
+    [finalEnergy, newRegenTimeStr, userId]
+  );
+
+  return { success: true, finalEnergy, newRegenTimeStr };
+}
+
 function buildPlayerInfo(jobs, treasures, playerData = null) {
   const defaultPlayer = {
     id: 'demo-player-1',
@@ -209,6 +252,8 @@ function buildPlayerInfo(jobs, treasures, playerData = null) {
     unclaimedRent: source.unclaimedRent,
     lastWealthTaxUtc: source.lastWealthTaxUtc,
     slotTempBalance: source.slotTempBalance ?? 0,
+    energy: source.energy ?? 20,
+    lastEnergyRegenUtc: source.lastEnergyRegenUtc,
     createdAt: source.createdAt,
     lastSeen: source.lastSeen,
     inventory,
@@ -241,6 +286,8 @@ async function getUserProfileFromDb(userId) {
       Accounts.UnclaimedRent,
       Accounts.LastWealthTaxUtc,
       Accounts.SlotTempBalance,
+      Accounts.Energy,
+      Accounts.LastEnergyRegenUtc,
       Users.FirstName,
       Users.LastName,
       Users.Username,
@@ -291,6 +338,8 @@ async function getUserProfileFromDb(userId) {
     unclaimedRent: row.UnclaimedRent,
     lastWealthTaxUtc: row.LastWealthTaxUtc,
     slotTempBalance: row.SlotTempBalance || 0,
+    energy: row.Energy ?? 20,
+    lastEnergyRegenUtc: row.LastEnergyRegenUtc,
     createdAt: row.CreatedAt,
     lastSeen: row.LastSeen,
     inventory: [],
@@ -1015,34 +1064,58 @@ io.on('connection', (socket) => {
       
       const currentBalance = playerData.balance || 0;
       const slotTempBalance = playerData.slotTempBalance || 0;
-      const WAGER = 10000;
-      const POT_ADDITION = 5000;
+      const isFirstSpin = slotTempBalance === 0;
+      const WAGER = isFirstSpin ? 10000 : 0;
+      const POT_ADDITION = isFirstSpin ? 5000 : 0;
       
       if (currentBalance < WAGER) {
-        return callback({ error: 'Insufficient balance to spin (Need $10,000)' });
+        return callback({ error: `Insufficient balance to start pot (Need $${WAGER.toLocaleString()})` });
       }
 
-      // Roll symbols
-      const symbolsList = [
-        { id: 'cherry', weight: 40 },
-        { id: 'coin', weight: 30 },
-        { id: 'skull', weight: 20 },
-        { id: 'crown', weight: 10 }
-      ];
-      
-      const getRandomSymbol = () => {
-        const totalWeight = symbolsList.reduce((acc, s) => acc + s.weight, 0);
-        let rand = Math.random() * totalWeight;
-        for (const s of symbolsList) {
-          if (rand < s.weight) return s.id;
-          rand -= s.weight;
-        }
-        return 'cherry';
-      };
+      const energyResult = await consumeEnergy(userId, 1);
+      if (!energyResult.success) {
+        return callback({ error: `Not enough energy to spin. Need 1 ⚡ (Current: ${energyResult.currentEnergy})` });
+      }
 
-      const slot1 = getRandomSymbol();
-      const slot2 = getRandomSymbol();
-      const slot3 = getRandomSymbol();
+      const outcomes = [
+        { type: 'match_cherry', weight: 38 },
+        { type: 'match_coin', weight: 34 },
+        { type: 'match_skull', weight: 10 },
+        { type: 'match_crown', weight: 2 },
+        { type: 'match_energy', weight: 3 },
+        { type: 'no_match', weight: 13 }
+      ];
+
+      const totalWeight = outcomes.reduce((acc, o) => acc + o.weight, 0);
+      let rand = Math.random() * totalWeight;
+      let outcome = 'no_match';
+      for (const o of outcomes) {
+        if (rand < o.weight) {
+          outcome = o.type;
+          break;
+        }
+        rand -= o.weight;
+      }
+
+      let slot1, slot2, slot3;
+      if (outcome === 'match_cherry') {
+        slot1 = slot2 = slot3 = 'cherry';
+      } else if (outcome === 'match_coin') {
+        slot1 = slot2 = slot3 = 'coin';
+      } else if (outcome === 'match_skull') {
+        slot1 = slot2 = slot3 = 'skull';
+      } else if (outcome === 'match_crown') {
+        slot1 = slot2 = slot3 = 'crown';
+      } else if (outcome === 'match_energy') {
+        slot1 = slot2 = slot3 = 'energy';
+      } else {
+        const symbols = ['cherry', 'coin', 'skull', 'crown', 'energy'];
+        slot1 = symbols[Math.floor(Math.random() * symbols.length)];
+        slot2 = symbols[Math.floor(Math.random() * symbols.length)];
+        do {
+          slot3 = symbols[Math.floor(Math.random() * symbols.length)];
+        } while (slot1 === slot2 && slot2 === slot3);
+      }
 
       const isMatch = (slot1 === slot2 && slot2 === slot3);
       
@@ -1072,6 +1145,14 @@ io.on('connection', (socket) => {
           newTempBalance = 0;
           isCashout = true;
           message = 'Jackpot! Crowns Match! Temp balance cashed out!';
+        } else if (slot1 === 'energy') {
+          energyResult.finalEnergy = Math.min(20, energyResult.finalEnergy + 3);
+          message = 'Zap! Energy Match! Gained 3 ⚡!';
+          
+          await querySqliteRun(
+            'UPDATE Accounts SET Energy = ? WHERE UserId = ?',
+            [energyResult.finalEnergy, userId]
+          );
         }
       }
 
@@ -1080,11 +1161,12 @@ io.on('connection', (socket) => {
         [newBalance, newTempBalance, userId]
       );
 
-      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, slotTempBalance: newTempBalance });
+      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, slotTempBalance: newTempBalance, energy: energyResult.finalEnergy });
       callback({ 
         success: true, 
         balance: newBalance, 
         slotTempBalance: newTempBalance,
+        energy: energyResult.finalEnergy,
         isWin: isMatch && !isBust, 
         isBust,
         isCashout,
