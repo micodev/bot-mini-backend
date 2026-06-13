@@ -164,6 +164,7 @@ function buildPlayerInfo(jobs, treasures, playerData = null) {
     lastRentUpdateUtc: null,
     unclaimedRent: 0,
     lastWealthTaxUtc: null,
+    slotTempBalance: 0,
     createdAt: null,
     lastSeen: null,
     inventory: [],
@@ -207,6 +208,7 @@ function buildPlayerInfo(jobs, treasures, playerData = null) {
     lastRentUpdateUtc: source.lastRentUpdateUtc,
     unclaimedRent: source.unclaimedRent,
     lastWealthTaxUtc: source.lastWealthTaxUtc,
+    slotTempBalance: source.slotTempBalance ?? 0,
     createdAt: source.createdAt,
     lastSeen: source.lastSeen,
     inventory,
@@ -238,6 +240,7 @@ async function getUserProfileFromDb(userId) {
       Accounts.LastRentUpdateUtc,
       Accounts.UnclaimedRent,
       Accounts.LastWealthTaxUtc,
+      Accounts.SlotTempBalance,
       Users.FirstName,
       Users.LastName,
       Users.Username,
@@ -287,6 +290,7 @@ async function getUserProfileFromDb(userId) {
     lastRentUpdateUtc: row.LastRentUpdateUtc,
     unclaimedRent: row.UnclaimedRent,
     lastWealthTaxUtc: row.LastWealthTaxUtc,
+    slotTempBalance: row.SlotTempBalance || 0,
     createdAt: row.CreatedAt,
     lastSeen: row.LastSeen,
     inventory: [],
@@ -1003,45 +1007,92 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('spin_slots', async ({userId, wager}, callback) => {
+  socket.on('spin_slots', async ({userId}, callback) => {
     if (!callback) return;
     try {
       const playerData = await getUserProfileFromDb(userId);
       if (!playerData) return callback({ error: 'Player not found' });
       
       const currentBalance = playerData.balance || 0;
-      if (typeof wager !== 'number' || wager <= 0 || !Number.isInteger(wager)) {
-        return callback({ error: 'Invalid wager amount' });
-      }
+      const slotTempBalance = playerData.slotTempBalance || 0;
+      const WAGER = 10000;
+      const POT_ADDITION = 5000;
       
-      if (currentBalance < wager) {
-        return callback({ error: 'Insufficient balance' });
+      if (currentBalance < WAGER) {
+        return callback({ error: 'Insufficient balance to spin (Need $10,000)' });
       }
 
-      const symbols = ['🍒', '🍋', '🍉', '⭐', '💎', '7️⃣'];
-      const slot1 = symbols[Math.floor(Math.random() * symbols.length)];
-      const slot2 = symbols[Math.floor(Math.random() * symbols.length)];
-      const slot3 = symbols[Math.floor(Math.random() * symbols.length)];
-
-      const isWin = (slot1 === slot2 && slot2 === slot3);
-      let multiplier = 0;
-      if (isWin) {
-        if (slot1 === '7️⃣') multiplier = 10;
-        else if (slot1 === '💎') multiplier = 5;
-        else multiplier = 3;
-      }
-
-      const payout = isWin ? wager * multiplier : 0;
-      const delta = isWin ? payout - wager : -wager;
-      const newBalance = currentBalance + delta;
+      // Roll symbols
+      const symbolsList = [
+        { id: 'cherry', weight: 40 },
+        { id: 'coin', weight: 30 },
+        { id: 'skull', weight: 20 },
+        { id: 'crown', weight: 10 }
+      ];
       
+      const getRandomSymbol = () => {
+        const totalWeight = symbolsList.reduce((acc, s) => acc + s.weight, 0);
+        let rand = Math.random() * totalWeight;
+        for (const s of symbolsList) {
+          if (rand < s.weight) return s.id;
+          rand -= s.weight;
+        }
+        return 'cherry';
+      };
+
+      const slot1 = getRandomSymbol();
+      const slot2 = getRandomSymbol();
+      const slot3 = getRandomSymbol();
+
+      const isMatch = (slot1 === slot2 && slot2 === slot3);
+      
+      let newBalance = currentBalance - WAGER;
+      let newTempBalance = slotTempBalance + POT_ADDITION;
+      let delta = -WAGER;
+      let message = '';
+      let isBust = false;
+      let isCashout = false;
+      let wonAmount = 0;
+
+      if (isMatch) {
+        if (slot1 === 'coin') {
+          newTempBalance = newTempBalance * 2;
+          message = 'Coins Match! Temp balance doubled!';
+        } else if (slot1 === 'cherry') {
+          newTempBalance = newTempBalance * 2;
+          message = 'Berries Match! Temp balance doubled!';
+        } else if (slot1 === 'skull') {
+          newTempBalance = 0;
+          isBust = true;
+          message = 'Oh no! Devils Match! You lost your temp balance!';
+        } else if (slot1 === 'crown') {
+          wonAmount = newTempBalance;
+          newBalance += newTempBalance;
+          delta = newBalance - currentBalance;
+          newTempBalance = 0;
+          isCashout = true;
+          message = 'Jackpot! Crowns Match! Temp balance cashed out!';
+        }
+      }
+
       await querySqliteRun(
-        'UPDATE Accounts SET Balance = ? WHERE UserId = ?',
-        [newBalance, userId]
+        'UPDATE Accounts SET Balance = ?, SlotTempBalance = ? WHERE UserId = ?',
+        [newBalance, newTempBalance, userId]
       );
 
-      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance });
-      callback({ success: true, balance: newBalance, isWin, payout, delta, resultSlots: [slot1, slot2, slot3] });
+      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, slotTempBalance: newTempBalance });
+      callback({ 
+        success: true, 
+        balance: newBalance, 
+        slotTempBalance: newTempBalance,
+        isWin: isMatch && !isBust, 
+        isBust,
+        isCashout,
+        payout: wonAmount, 
+        delta, 
+        resultSlots: [slot1, slot2, slot3],
+        message
+      });
     } catch (error) {
       console.error('Failed to spin slots:', error);
       callback({ error: 'Internal Server Error' });
