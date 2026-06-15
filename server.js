@@ -1153,8 +1153,8 @@ io.on('connection', (socket) => {
 
       if (isMatch) {
         if (slot1 === 'coin') {
-          newTempBalance = newTempBalance * 2;
-          message = 'Coins Match! Temp balance doubled!';
+          newTempBalance = newTempBalance * 3;
+          message = 'Coins Match! Temp balance tripled!';
         } else if (slot1 === 'cherry') {
           newTempBalance = newTempBalance * 2;
           message = 'Berries Match! Temp balance doubled!';
