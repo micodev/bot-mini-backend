@@ -1286,6 +1286,40 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('plinko_settle', async ({userId, wager, winnings}, callback) => {
+    if (!callback) return;
+    try {
+      const playerData = await getUserProfileFromDb(userId);
+      if (!playerData) return callback({ error: 'Player not found' });
+      
+      const currentBalance = playerData.balance || 0;
+      if (typeof wager !== 'number' || wager < 0) {
+        return callback({ error: 'Invalid wager amount' });
+      }
+      
+      if (currentBalance < wager) {
+        return callback({ error: 'Insufficient balance' });
+      }
+
+      if (typeof winnings !== 'number' || winnings < 0) {
+        return callback({ error: 'Invalid winnings' });
+      }
+
+      const newBalance = Math.floor(currentBalance - wager + winnings);
+
+      await querySqliteRun(
+        'UPDATE Accounts SET Balance = ? WHERE UserId = ?',
+        [newBalance, userId]
+      );
+
+      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance });
+      callback({ success: true, balance: newBalance });
+    } catch (error) {
+      console.error('Failed to settle plinko:', error);
+      callback({ error: 'Internal Server Error' });
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
     connectedUsers.delete(socket.id);
