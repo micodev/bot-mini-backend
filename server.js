@@ -494,6 +494,24 @@ app.get('/api/jobs', async (req, res) => {
   }
 })
 
+app.get('/api/market', async (req, res) => {
+  try {
+    const rows = await querySqliteAll('SELECT Category, Multiplier, Trend, LastUpdated FROM MarketPrices')
+    const marketData = {}
+    rows.forEach(row => {
+      marketData[row.Category] = {
+        multiplier: row.Multiplier,
+        trend: row.Trend,
+        lastUpdated: row.LastUpdated
+      }
+    })
+    return res.json(marketData)
+  } catch (error) {
+    console.error('Failed to load market:', error)
+    return res.status(500).json({ error: 'Failed to load market' })
+  }
+})
+
 app.post('/api/player/:id/salary', async (req, res) => {
   try {
     const userId = req.params.id
@@ -726,6 +744,12 @@ redisClient.on('error', (err) => console.error('Redis Client Error', err));
       try {
         const data = JSON.parse(message);
         const { userId, type, ...payload } = data;
+        
+        if (type === 'market_update') {
+          io.emit('market_update', payload.data);
+          return;
+        }
+
         if (userId && type) {
           if (type === 'force_profile_update') {
             // Fetch latest profile and push to user
