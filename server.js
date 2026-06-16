@@ -1286,7 +1286,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('plinko_settle', async ({userId, wager, winnings}, callback) => {
+  socket.on('plinko_settle', async ({userId, wager, winnings, energyUsed}, callback) => {
     if (!callback) return;
     try {
       const playerData = await getUserProfileFromDb(userId);
@@ -1305,6 +1305,15 @@ io.on('connection', (socket) => {
         return callback({ error: 'Invalid winnings' });
       }
 
+      let finalEnergy;
+      if (typeof energyUsed === 'number' && energyUsed > 0) {
+        const energyResult = await consumeEnergy(userId, energyUsed);
+        if (!energyResult.success) {
+          return callback({ error: `Not enough energy. Need ${energyUsed} ⚡` });
+        }
+        finalEnergy = energyResult.finalEnergy;
+      }
+
       const newBalance = Math.floor(currentBalance - wager + winnings);
 
       await querySqliteRun(
@@ -1312,8 +1321,13 @@ io.on('connection', (socket) => {
         [newBalance, userId]
       );
 
-      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance });
-      callback({ success: true, balance: newBalance });
+      const payload = { balance: newBalance };
+      if (finalEnergy !== undefined) {
+        payload.energy = finalEnergy;
+      }
+
+      io.to(`user_${userId}`).emit('profile_update', payload);
+      callback({ success: true, ...payload });
     } catch (error) {
       console.error('Failed to settle plinko:', error);
       callback({ error: 'Internal Server Error' });
