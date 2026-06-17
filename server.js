@@ -1286,6 +1286,32 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('plinko_start', async ({userId, energyUsed}, callback) => {
+    if (!callback) return;
+    try {
+      const playerData = await getUserProfileFromDb(userId);
+      if (!playerData) return callback({ error: 'Player not found' });
+      
+      let finalEnergy;
+      if (typeof energyUsed === 'number' && energyUsed > 0) {
+        const energyResult = await consumeEnergy(userId, energyUsed);
+        if (!energyResult.success) {
+          return callback({ error: `Not enough energy. Need ${energyUsed} ⚡` });
+        }
+        finalEnergy = energyResult.finalEnergy;
+      } else {
+        return callback({ error: 'Invalid energy amount' });
+      }
+
+      const payload = { energy: finalEnergy };
+      io.to(`user_${userId}`).emit('profile_update', payload);
+      callback({ success: true, ...payload });
+    } catch (error) {
+      console.error('Failed to start plinko:', error);
+      callback({ error: 'Internal Server Error' });
+    }
+  });
+
   socket.on('plinko_settle', async ({userId, wager, winnings, energyUsed}, callback) => {
     if (!callback) return;
     try {
