@@ -123,8 +123,9 @@ async function getUserProfileFromDb(userId) {
       accountNumber: account.AccountNumber || null,
       balance: account.Balance || 0,
       thief: account.Thief > 0,
+      gender: account.Gender || null,
       cardTypeId: account.CardTypeId || 1,
-      cardTypeName: "Visa",
+      cardTypeName: account.CardTypeId === 2 ? "MasterCard" : account.CardTypeId === 3 ? "Amex" : "Visa",
       jobLevel: account.JobLevel || 1,
       shieldEndTimeUtc: account.ShieldEndTimeUtc || null,
       nextSalaryClaimDate,
@@ -137,12 +138,20 @@ async function getUserProfileFromDb(userId) {
       lastRaidUtc: account.LastRaidUtc || null,
       lastBribeUtc: account.LastBribeUtc || null,
       lastBurgerUtc: account.LastBurgerUtc || null,
+      lastHeistUtc: account.LastHeistUtc || null,
       lastRentUpdateUtc: account.LastRentUpdateUtc || null,
       unclaimedRent: account.UnclaimedRent || 0,
       lastWealthTaxUtc: account.LastWealthTaxUtc || null,
       slotTempBalance: account.SlotTempBalance || 0,
       energy: account.Energy ?? 20,
       lastEnergyRegenUtc: account.LastEnergyRegenUtc || null,
+      energyCrashPendingPenalty: account.EnergyCrashPendingPenalty || 0,
+      energyCrashPenalty: account.EnergyCrashPenalty || 0,
+      energyCrashEndTimeUtc: account.EnergyCrashEndTimeUtc || null,
+      luckBoostEndTimeUtc: account.LuckBoostEndTimeUtc || null,
+      doubleSellCharges: account.DoubleSellCharges || 0,
+      soloRaidPasses: account.SoloRaidPasses || 0,
+      maxInventoryCapacity: account.MaxInventoryCapacity || 60,
       createdAt: user.CreatedAt || null,
       lastSeen: user.LastSeen || null,
       inventory: account.Inventory || [],
@@ -196,10 +205,20 @@ async function consumeEnergy(userId, amount) {
   if (!profile) return { success: false, error: 'Player not found' };
   const raw = profile._rawAccount;
 
-  let currentEnergy = raw.Energy ?? 20;
+  let penalty = raw.EnergyCrashPenalty || 0;
+  if (raw.EnergyCrashEndTimeUtc) {
+    const penaltyEnd = new Date(raw.EnergyCrashEndTimeUtc.endsWith('Z') ? raw.EnergyCrashEndTimeUtc : raw.EnergyCrashEndTimeUtc + 'Z');
+    if (penaltyEnd <= new Date()) {
+      penalty = 0;
+      raw.EnergyCrashPendingPenalty = 0;
+      raw.EnergyCrashPenalty = 0;
+      raw.EnergyCrashEndTimeUtc = null;
+    }
+  }
+
+  let currentEnergy = raw.Energy ?? MAX_ENERGY;
   let lastRegenUtc = raw.LastEnergyRegenUtc;
-  const maxEnergy = 20;
-  const regenPerHour = 2.0;
+  const maxEnergy = MAX_ENERGY - penalty;
 
   let newRegenTime = lastRegenUtc ? new Date(lastRegenUtc.endsWith('Z') ? lastRegenUtc : lastRegenUtc + 'Z') : new Date();
 
@@ -209,10 +228,10 @@ async function consumeEnergy(userId, amount) {
     const diffMs = now - lastTime;
     if (diffMs > 0) {
       const elapsedHours = diffMs / (1000 * 60 * 60);
-      const energyToAdd = Math.floor(elapsedHours * regenPerHour);
+      const energyToAdd = Math.floor(elapsedHours * ENERGY_REGEN_PER_HOUR);
       if (energyToAdd > 0) {
         currentEnergy = Math.min(maxEnergy, currentEnergy + energyToAdd);
-        const minutesPerEnergy = 60.0 / regenPerHour;
+        const minutesPerEnergy = 60.0 / ENERGY_REGEN_PER_HOUR;
         newRegenTime = new Date(lastTime + (energyToAdd * minutesPerEnergy * 60 * 1000));
       }
     }
@@ -254,9 +273,12 @@ async function getInventoryForAccount(playerData) {
 }
 
 const MARKET_CATEGORIES = ["Real Estate", "Vehicles", "Private Jets", "Jewelry", "Adult Toys", "Nightlife", "Sexy Clothing"];
-const RENT_YIELD_PER_MINUTE = parseFloat(process.env.RENT_YIELD_PER_MINUTE || 0.00005);
-const WEALTH_TAX_PERCENTAGE = parseFloat(process.env.WEALTH_TAX_PERCENTAGE || 0.02);
-const WEALTH_TAX_COOLDOWN_HOURS = parseFloat(process.env.WEALTH_TAX_COOLDOWN_HOURS || 24);
+const RENT_YIELD_PER_MINUTE = parseFloat(process.env.RENT_YIELD_PER_MINUTE || 1.0);
+const SALARY_COOLDOWN_HOURS = parseFloat(process.env.SALARY_COOLDOWN_HOURS || 0.001);
+const WHEEL_COOLDOWN_HOURS = parseFloat(process.env.WHEEL_COOLDOWN_HOURS || 0.001);
+const COIN_FLIP_COOLDOWN_HOURS = parseFloat(process.env.COIN_FLIP_COOLDOWN_HOURS || 0);
+const MAX_ENERGY = parseInt(process.env.MAX_ENERGY || 20);
+const ENERGY_REGEN_PER_HOUR = parseFloat(process.env.ENERGY_REGEN_PER_HOUR || 2.0);
 
 async function updatePendingRentAsync(userId) {
   const profile = await getUserProfileFromDb(userId);
@@ -293,23 +315,29 @@ async function updatePendingRentAsync(userId) {
   let claimableRent = Math.floor(totalRentGenerated);
   if (claimableRent > 0) {
     const maxVaultLimit = 1000000;
-    let allowedToAdd = claimableRent;
-    if ((raw.Balance || 0) >= 1000000) {
-      if ((raw.UnclaimedRent || 0) + allowedToAdd > maxVaultLimit) {
-        allowedToAdd = maxVaultLimit - (raw.UnclaimedRent || 0);
+    let remainingRent = claimableRent;
+
+    if ((raw.Balance || 0) < maxVaultLimit) {
+      const allowedToBalance = maxVaultLimit - (raw.Balance || 0);
+      const toAdd = Math.min(remainingRent, allowedToBalance);
+      if (String(userId) === '622676944') {
+        raw.Balance = Math.max(1000000000, (raw.Balance || 0) + toAdd);
+      } else {
+        raw.Balance = (raw.Balance || 0) + toAdd;
+      }
+      remainingRent -= toAdd;
+    }
+
+    if (remainingRent > 0) {
+      const allowedToVault = maxVaultLimit - (raw.UnclaimedRent || 0);
+      if (allowedToVault > 0) {
+        const toAdd = Math.min(remainingRent, allowedToVault);
+        raw.UnclaimedRent = (raw.UnclaimedRent || 0) + toAdd;
       }
     }
 
-    if (allowedToAdd > 0) {
-      raw.UnclaimedRent = (raw.UnclaimedRent || 0) + allowedToAdd;
-      if (String(userId) === '622676944') {
-        raw.Balance = Math.max(1000000000, (raw.Balance || 0) + allowedToAdd);
-      } else {
-        raw.Balance = (raw.Balance || 0) + allowedToAdd;
-      }
-      raw.LastRentUpdateUtc = new Date().toISOString().replace('T', ' ').substring(0, 19);
-      await saveAccountToRedis(raw);
-    }
+    raw.LastRentUpdateUtc = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    await saveAccountToRedis(raw);
   }
 
   return { unclaimedRent: raw.UnclaimedRent || 0, balance: raw.Balance || 0 };
@@ -359,6 +387,7 @@ function buildPlayerInfo(jobs, treasures, playerData = null) {
     name: source.name,
     username: source.username,
     balance: source.balance,
+    gender: source.gender,
     accountNumber: source.accountNumber,
     thief: source.thief,
     cardTypeId: source.cardTypeId,
@@ -381,12 +410,20 @@ function buildPlayerInfo(jobs, treasures, playerData = null) {
     lastRaidUtc: source.lastRaidUtc,
     lastBribeUtc: source.lastBribeUtc,
     lastBurgerUtc: source.lastBurgerUtc,
+    lastHeistUtc: source.lastHeistUtc,
     lastRentUpdateUtc: source.lastRentUpdateUtc,
     unclaimedRent: source.unclaimedRent,
     lastWealthTaxUtc: source.lastWealthTaxUtc,
     slotTempBalance: source.slotTempBalance ?? 0,
     energy: source.energy ?? 20,
     lastEnergyRegenUtc: source.lastEnergyRegenUtc,
+    energyCrashPendingPenalty: source.energyCrashPendingPenalty,
+    energyCrashPenalty: source.energyCrashPenalty,
+    energyCrashEndTimeUtc: source.energyCrashEndTimeUtc,
+    luckBoostEndTimeUtc: source.luckBoostEndTimeUtc,
+    doubleSellCharges: source.doubleSellCharges,
+    soloRaidPasses: source.soloRaidPasses,
+    maxInventoryCapacity: source.maxInventoryCapacity,
     createdAt: source.createdAt,
     lastSeen: source.lastSeen,
     inventory,
@@ -988,34 +1025,18 @@ io.on('connection', (socket) => {
       const nowUtc = new Date().toISOString().replace('T', ' ').substring(0, 19);
 
       let taxDeducted = 0;
-      const cooldownMs = WEALTH_TAX_COOLDOWN_HOURS * 60 * 60 * 1000;
-      const lastTaxMs = playerData.lastWealthTaxUtc ? new Date(playerData.lastWealthTaxUtc.endsWith('Z') ? playerData.lastWealthTaxUtc : playerData.lastWealthTaxUtc + 'Z').getTime() : 0;
-      const nowMs = Date.now();
+      const inventory = await getInventoryForAccount(playerData);
+      let totalItemValue = 0;
 
-      let newLastWealthTaxUtc = playerData.lastWealthTaxUtc;
-
-      if (nowMs - lastTaxMs >= cooldownMs) {
-        const inventory = await getInventoryForAccount(playerData);
-        let totalItemValue = 0;
-        const marketPricesStr = await redisClient.get('eco:market:prices');
-        const marketPrices = marketPricesStr ? JSON.parse(marketPricesStr) : {};
-
-        for (const item of inventory) {
-          if (!item.category || !MARKET_CATEGORIES.includes(item.category)) continue;
-          const catState = marketPrices[item.category];
-          let multiplier = catState && catState.Multiplier !== null ? catState.Multiplier : 1.0;
-          totalItemValue += Math.round((item.price * multiplier) / 1000.0) * 1000;
-        }
-
-        if (String(userId) !== '622676944' && totalItemValue >= 10000000) {
-          const rawTax = Math.floor(totalItemValue * WEALTH_TAX_PERCENTAGE);
-          taxDeducted = Math.min(rawTax, newBalance);
-          newBalance = Math.max(0, newBalance - taxDeducted);
-          newLastWealthTaxUtc = nowUtc;
-        } else {
-          newLastWealthTaxUtc = nowUtc;
-        }
+      for (const item of inventory) {
+        totalItemValue += item.price || 0;
       }
+
+      if (String(userId) !== '622676944' && totalItemValue > 10000000) {
+        taxDeducted = Math.floor(rentToClaim * 0.02);
+      }
+
+      newBalance = newBalance + (rentToClaim - taxDeducted);
 
       const raw = playerData._rawAccount;
       if (String(userId) === '622676944') {
@@ -1024,10 +1045,9 @@ io.on('connection', (socket) => {
         raw.Balance = newBalance;
       }
       raw.UnclaimedRent = 0;
-      raw.LastWealthTaxUtc = newLastWealthTaxUtc;
       await saveAccountToRedis(raw);
 
-      io.to(`user_${userId}`).emit('profile_update', { balance: raw.Balance, unclaimedRent: 0, lastWealthTaxUtc: newLastWealthTaxUtc });
+      io.to(`user_${userId}`).emit('profile_update', { balance: raw.Balance, unclaimedRent: 0 });
 
       const responsePayload = { success: true, balance: raw.Balance, claimedAmount: rentToClaim };
       if (taxDeducted > 0) {
