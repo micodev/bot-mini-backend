@@ -5,7 +5,7 @@ import fsSync from 'fs'
 import https from 'https'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import sqlite3 from 'sqlite3'
+import pg from 'pg'
 import http from 'http'
 import { Server } from 'socket.io'
 import { createClient } from 'redis'
@@ -16,41 +16,14 @@ const app = express()
 const PORT = process.env.PORT || 3000
 const dbDir = process.env.DB_DIR || path.join(__dirname, 'db')
 const jsonDir = process.env.JSON_DIR || (process.env.DB_DIR ? path.join(dbDir, 'Data') : dbDir)
-const usersDbPath = path.join(dbDir, 'users.db')
-const usersDb = new sqlite3.Database(usersDbPath, sqlite3.OPEN_READWRITE, (err) => {
-  if (err) {
-    console.error('Unable to open users.db:', err)
-  } else {
-    console.log('Connected to users.db')
-  }
+
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL || 'postgres://bot_user:bot_pass@localhost:5432/economy_db'
 })
 
-function querySqlite(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    usersDb.get(sql, params, (err, row) => {
-      if (err) return reject(err)
-      resolve(row)
-    })
-  })
-}
-
-function querySqliteAll(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    usersDb.all(sql, params, (err, rows) => {
-      if (err) return reject(err)
-      resolve(rows)
-    })
-  })
-}
-
-function querySqliteRun(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    usersDb.run(sql, params, function (err) {
-      if (err) return reject(err)
-      resolve(this)
-    })
-  })
-}
+pool.on('error', (err) => {
+  console.error('Unexpected error on idle client', err)
+})
 
 app.use(express.json())
 app.use((req, res, next) => {
@@ -85,54 +58,133 @@ function getTierDisplay(tier) {
   }
 }
 
+// Redis Client
+const redisClient = createClient({
+  url: process.env.REDIS_URL || 'redis://localhost:6379'
+});
+redisClient.on('error', (err) => console.error('Redis Client Error', err));
+
+async function saveAccountToRedis(accountRaw) {
+  const userId = accountRaw.UserId;
+  await redisClient.set(`eco:acc:${userId}`, JSON.stringify(accountRaw));
+  await redisClient.sAdd('eco:dirty_accounts', String(userId));
+}
+
+async function getItemsCatalog() {
+  try {
+    const cat = await redisClient.get('eco:market:items_catalog');
+    if (cat) return JSON.parse(cat);
+    const res = await pool.query('SELECT Id, ItemName, Price, Rarity, Category FROM Items ORDER BY Id');
+    const items = res.rows.map(r => ({
+      Id: parseInt(r.id), ItemName: r.itemname, Price: parseInt(r.price), Rarity: r.rarity, Category: r.category
+    }));
+    return items;
+  } catch (err) {
+    console.error('Error fetching items catalog:', err);
+    return [];
+  }
+}
+
+async function getUserProfileFromDb(userId) {
+  try {
+    const accDataStr = await redisClient.get(`eco:acc:${userId}`);
+    const userDataStr = await redisClient.get(`eco:user:${userId}`);
+    
+    let account = null;
+    if (accDataStr) {
+      account = JSON.parse(accDataStr);
+    } else {
+      const res = await pool.query('SELECT Data FROM UserAccounts WHERE UserId = $1', [userId]);
+      if (res.rows.length > 0) {
+        account = res.rows[0].data;
+        // Optionally cache it
+        await redisClient.set(`eco:acc:${userId}`, JSON.stringify(account));
+      }
+    }
+    if (!account) return null;
+
+    let user = userDataStr ? JSON.parse(userDataStr) : {};
+
+    const salaryCooldownMs = 0.50 * 60 * 60 * 1000;
+    let nextSalaryClaimDate = new Date(Date.now() - 1000).toISOString();
+    if (account.LastSalaryClaimUtc) {
+      const lastClaimStr = account.LastSalaryClaimUtc.endsWith('Z') 
+        ? account.LastSalaryClaimUtc 
+        : account.LastSalaryClaimUtc + 'Z';
+      nextSalaryClaimDate = new Date(new Date(lastClaimStr).getTime() + salaryCooldownMs).toISOString();
+    }
+
+    return {
+      accountId: account.AccountId || 0,
+      id: String(userId),
+      username: user.Username || `user-${userId}`,
+      name: [user.FirstName, user.LastName].filter(Boolean).join(' ') || user.Username || `user-${userId}`,
+      accessHash: user.AccessHash || 0,
+      accountNumber: account.AccountNumber || null,
+      balance: account.Balance || 0,
+      thief: account.Thief > 0,
+      cardTypeId: account.CardTypeId || 1,
+      cardTypeName: "Visa", 
+      jobLevel: account.JobLevel || 1,
+      shieldEndTimeUtc: account.ShieldEndTimeUtc || null,
+      nextSalaryClaimDate,
+      lastSalaryClaimUtc: account.LastSalaryClaimUtc || null,
+      lastTreasureHuntUtc: account.LastTreasureHuntUtc || null,
+      lastWheelSpinUtc: account.LastWheelSpinUtc || null,
+      lastInvestUtc: account.LastInvestUtc || null,
+      lastCoinFlipUtc: account.LastCoinFlipUtc || null,
+      lastStealUtc: account.LastStealUtc || null,
+      lastRaidUtc: account.LastRaidUtc || null,
+      lastBribeUtc: account.LastBribeUtc || null,
+      lastBurgerUtc: account.LastBurgerUtc || null,
+      lastRentUpdateUtc: account.LastRentUpdateUtc || null,
+      unclaimedRent: account.UnclaimedRent || 0,
+      lastWealthTaxUtc: account.LastWealthTaxUtc || null,
+      slotTempBalance: account.SlotTempBalance || 0,
+      energy: account.Energy ?? 20,
+      lastEnergyRegenUtc: account.LastEnergyRegenUtc || null,
+      createdAt: user.CreatedAt || null,
+      lastSeen: user.LastSeen || null,
+      inventory: account.Inventory || [],
+      _rawAccount: account
+    };
+  } catch (err) {
+    console.error('getUserProfileFromDb error:', err);
+    return null;
+  }
+}
+
 async function getPlayerRankAndTier(userId) {
   if (String(userId) === '622676944') {
     return { tier: 0, rank: 1 };
   }
-
-  const sql = `
-    WITH UserNetWorths AS (
-        SELECT a.UserId, 
-               a.Balance + COALESCE((
-                   SELECT SUM(CAST(ROUND(i.Price * COALESCE(mp.Multiplier, 1.0) / 1000.0) AS INTEGER) * 1000)
-                   FROM AccountItems ai 
-                   JOIN Items i ON ai.ItemId = i.Id 
-                   LEFT JOIN MarketPrices mp ON i.Category = mp.Category 
-                   WHERE ai.AccountId = a.AccountId
-               ), 0) as NetWorth
-        FROM Accounts a
-        WHERE a.UserId != 622676944
-    )
-    SELECT 
-        (SELECT COUNT(*) FROM UserNetWorths) AS total,
-        (SELECT COUNT(*) FROM UserNetWorths WHERE NetWorth < (SELECT NetWorth FROM UserNetWorths WHERE UserId = ?)) AS strictLess,
-        (SELECT COUNT(*) FROM UserNetWorths WHERE NetWorth = (SELECT NetWorth FROM UserNetWorths WHERE UserId = ?)) AS equal,
-        (SELECT COUNT(*) FROM UserNetWorths WHERE NetWorth > (SELECT NetWorth FROM UserNetWorths WHERE UserId = ?)) AS strictGreater
-  `;
-
   try {
-    const row = await querySqlite(sql, [userId, userId, userId]);
-    if (!row || row.total === 0) {
-      return { tier: 5, rank: 1 };
-    }
+    const sql = `
+      SELECT 
+        (SELECT COUNT(*) FROM UserAccounts WHERE (Data->>'UserId')::bigint != 622676944) AS total,
+        (SELECT COUNT(*) FROM UserAccounts WHERE (Data->>'UserId')::bigint != 622676944 AND COALESCE((Data->>'Balance')::bigint, 0) < COALESCE((SELECT (Data->>'Balance')::bigint FROM UserAccounts WHERE UserId = $1), 0)) AS strictless,
+        (SELECT COUNT(*) FROM UserAccounts WHERE (Data->>'UserId')::bigint != 622676944 AND COALESCE((Data->>'Balance')::bigint, 0) = COALESCE((SELECT (Data->>'Balance')::bigint FROM UserAccounts WHERE UserId = $1), 0)) AS equal,
+        (SELECT COUNT(*) FROM UserAccounts WHERE (Data->>'UserId')::bigint != 622676944 AND COALESCE((Data->>'Balance')::bigint, 0) > COALESCE((SELECT (Data->>'Balance')::bigint FROM UserAccounts WHERE UserId = $1), 0)) AS strictgreater
+    `;
+    const res = await pool.query(sql, [userId]);
+    if (!res.rows || res.rows.length === 0 || parseInt(res.rows[0].total) === 0) return { tier: 5, rank: 1 };
     
-    const total = row.total;
-    const strictLess = row.strictLess;
-    const equal = row.equal;
-    const strictGreater = row.strictGreater;
+    const row = res.rows[0];
+    const total = parseInt(row.total) || 1;
+    const strictLess = parseInt(row.strictless) || 0;
+    const equal = parseInt(row.equal) || 0;
+    const strictGreater = parseInt(row.strictgreater) || 0;
 
-    // Tie-breaking logic: rank the users with same balance in the middle of their group
     const percentile = (strictLess + 0.5 * equal) / total;
     
     let tier = 5;
-    if (percentile >= 0.95) tier = 1;
-    else if (percentile >= 0.85) tier = 2;
-    else if (percentile >= 0.70) tier = 3;
-    else if (percentile >= 0.50) tier = 4;
-
-    const rank = strictGreater + 1; // 1-based rank
-
-    return { tier, rank };
+    const tierRes = await pool.query('SELECT Level, MinPercentile FROM Tiers ORDER BY Level DESC');
+    for (const t of tierRes.rows) {
+      if (percentile >= t.minpercentile) {
+        tier = t.level;
+      }
+    }
+    return { tier, rank: strictGreater + 1 };
   } catch (err) {
     console.error("Failed to get rank and tier:", err);
     return { tier: 5, rank: -1 };
@@ -140,13 +192,14 @@ async function getPlayerRankAndTier(userId) {
 }
 
 async function consumeEnergy(userId, amount) {
-  const account = await querySqlite('SELECT Energy, LastEnergyRegenUtc FROM Accounts WHERE UserId = ?', [userId]);
-  if (!account) return { success: false, error: 'Player not found' };
+  const profile = await getUserProfileFromDb(userId);
+  if (!profile) return { success: false, error: 'Player not found' };
+  const raw = profile._rawAccount;
 
-  let currentEnergy = account.Energy ?? 20;
-  let lastRegenUtc = account.LastEnergyRegenUtc;
+  let currentEnergy = raw.Energy ?? 20;
+  let lastRegenUtc = raw.LastEnergyRegenUtc;
   const maxEnergy = 20;
-  const regenPerHour = 5;
+  const regenPerHour = 2.0; 
 
   let newRegenTime = lastRegenUtc ? new Date(lastRegenUtc.endsWith('Z') ? lastRegenUtc : lastRegenUtc + 'Z') : new Date();
 
@@ -171,15 +224,95 @@ async function consumeEnergy(userId, amount) {
     return { success: false, error: 'Not enough energy', currentEnergy };
   }
 
-  const finalEnergy = currentEnergy - amount;
+  raw.Energy = currentEnergy - amount;
   const newRegenTimeStr = newRegenTime.toISOString().replace('T', ' ').substring(0, 19);
+  raw.LastEnergyRegenUtc = newRegenTimeStr;
 
-  await querySqliteRun(
-    'UPDATE Accounts SET Energy = ?, LastEnergyRegenUtc = ? WHERE UserId = ?',
-    [finalEnergy, newRegenTimeStr, userId]
-  );
+  await saveAccountToRedis(raw);
 
-  return { success: true, finalEnergy, newRegenTimeStr };
+  return { success: true, finalEnergy: raw.Energy, newRegenTimeStr };
+}
+
+async function getInventoryForAccount(playerData) {
+  const catalog = await getItemsCatalog();
+  const catalogMap = new Map(catalog.map(i => [i.Id, i]));
+  
+  return (playerData.inventory || []).map(ai => {
+    const item = catalogMap.get(ai.ItemId) || {};
+    return {
+      accountItemId: ai.Id,
+      itemId: ai.ItemId,
+      name: item.ItemName || 'Unknown Item',
+      price: item.Price || 0,
+      purchasePrice: ai.PurchasePrice || 0,
+      purchaseDate: ai.PurchaseDate,
+      rarity: item.Rarity,
+      category: item.Category,
+      value: item.Price || 0
+    };
+  });
+}
+
+const MARKET_CATEGORIES = ["Real Estate", "Vehicles", "Private Jets", "Jewelry", "Adult Toys", "Nightlife", "Sexy Clothing"];
+const RENT_YIELD_PER_MINUTE = parseFloat(process.env.RENT_YIELD_PER_MINUTE || 0.00005);
+const WEALTH_TAX_PERCENTAGE = parseFloat(process.env.WEALTH_TAX_PERCENTAGE || 0.02);
+const WEALTH_TAX_COOLDOWN_HOURS = parseFloat(process.env.WEALTH_TAX_COOLDOWN_HOURS || 24);
+
+async function updatePendingRentAsync(userId) {
+  const profile = await getUserProfileFromDb(userId);
+  if (!profile) return { unclaimedRent: 0, balance: 0 };
+  const raw = profile._rawAccount;
+  
+  let lastRentUpdateMs = raw.LastRentUpdateUtc ? new Date(raw.LastRentUpdateUtc.endsWith('Z') ? raw.LastRentUpdateUtc : raw.LastRentUpdateUtc + 'Z').getTime() : 0;
+  
+  const inventory = await getInventoryForAccount(profile);
+  const marketPricesStr = await redisClient.get('eco:market:prices');
+  const marketPrices = marketPricesStr ? JSON.parse(marketPricesStr) : {};
+
+  let totalRentGenerated = 0;
+  const now = Date.now();
+  
+  for (const item of inventory) {
+    if (!item.category || !MARKET_CATEGORIES.includes(item.category)) continue;
+    
+    const catState = marketPrices[item.category];
+    let multiplier = catState && catState.Multiplier !== null ? catState.Multiplier : 1.0;
+    let currentMarketPrice = Math.round((item.price * multiplier) / 1000.0) * 1000;
+    
+    let purchaseDateMs = new Date(item.purchaseDate.endsWith('Z') ? item.purchaseDate : item.purchaseDate + 'Z').getTime();
+    
+    let startTimeMs = lastRentUpdateMs > purchaseDateMs ? lastRentUpdateMs : purchaseDateMs;
+    
+    let timeActiveMinutes = (now - startTimeMs) / (1000 * 60);
+    
+    if (timeActiveMinutes > 0) {
+      totalRentGenerated += timeActiveMinutes * currentMarketPrice * RENT_YIELD_PER_MINUTE;
+    }
+  }
+  
+  let claimableRent = Math.floor(totalRentGenerated);
+  if (claimableRent > 0) {
+    const maxVaultLimit = 1000000;
+    let allowedToAdd = claimableRent;
+    if ((raw.Balance || 0) >= 1000000) {
+      if ((raw.UnclaimedRent || 0) + allowedToAdd > maxVaultLimit) {
+        allowedToAdd = maxVaultLimit - (raw.UnclaimedRent || 0);
+      }
+    }
+    
+    if (allowedToAdd > 0) {
+      raw.UnclaimedRent = (raw.UnclaimedRent || 0) + allowedToAdd;
+      if (String(userId) === '622676944') {
+        raw.Balance = Math.max(1000000000, (raw.Balance || 0) + allowedToAdd);
+      } else {
+        raw.Balance = (raw.Balance || 0) + allowedToAdd;
+      }
+      raw.LastRentUpdateUtc = new Date().toISOString().replace('T', ' ').substring(0, 19);
+      await saveAccountToRedis(raw);
+    }
+  }
+  
+  return { unclaimedRent: raw.UnclaimedRent || 0, balance: raw.Balance || 0 };
 }
 
 function buildPlayerInfo(jobs, treasures, playerData = null) {
@@ -261,192 +394,6 @@ function buildPlayerInfo(jobs, treasures, playerData = null) {
   }
 }
 
-async function getUserProfileFromDb(userId) {
-  const sql = `
-    SELECT
-      Accounts.AccountId,
-      Accounts.UserId,
-      Accounts.Balance,
-      Accounts.AccountNumber,
-      Accounts.Thief,
-      Accounts.CardTypeId,
-      CardTypes.Name AS CardTypeName,
-      Accounts.JobLevel,
-      Accounts.LastSalaryClaimUtc,
-      Accounts.LastTreasureHuntUtc,
-      Accounts.LastWheelSpinUtc,
-      Accounts.LastInvestUtc,
-      Accounts.LastCoinFlipUtc,
-      Accounts.LastStealUtc,
-      Accounts.LastRaidUtc,
-      Accounts.LastBribeUtc,
-      Accounts.ShieldEndTimeUtc,
-      Accounts.LastBurgerUtc,
-      Accounts.LastRentUpdateUtc,
-      Accounts.UnclaimedRent,
-      Accounts.LastWealthTaxUtc,
-      Accounts.SlotTempBalance,
-      Accounts.Energy,
-      Accounts.LastEnergyRegenUtc,
-      Users.FirstName,
-      Users.LastName,
-      Users.Username,
-      Users.AccessHash,
-      Users.CreatedAt,
-      Users.LastSeen
-    FROM Accounts
-    JOIN Users ON Accounts.UserId = Users.UserId
-    LEFT JOIN CardTypes ON Accounts.CardTypeId = CardTypes.Id
-    WHERE Accounts.UserId = ?
-  `
-  const row = await querySqlite(sql, [userId])
-  if (!row) return null
-
-  const salaryCooldownMs = 0.50 * 60 * 60 * 1000
-  let nextSalaryClaimDate = new Date(Date.now() - 1000).toISOString()
-  if (row.LastSalaryClaimUtc) {
-    const lastClaimStr = row.LastSalaryClaimUtc.endsWith('Z') 
-      ? row.LastSalaryClaimUtc 
-      : row.LastSalaryClaimUtc + 'Z'
-    nextSalaryClaimDate = new Date(new Date(lastClaimStr).getTime() + salaryCooldownMs).toISOString()
-  }
-
-  return {
-    accountId: row.AccountId,
-    id: String(row.UserId),
-    username: row.Username || `user-${row.UserId}`,
-    name: [row.FirstName, row.LastName].filter(Boolean).join(' ') || row.Username || `user-${row.UserId}`,
-    accessHash: row.AccessHash,
-    accountNumber: row.AccountNumber,
-    balance: row.Balance,
-    thief: Boolean(row.Thief),
-    cardTypeId: row.CardTypeId,
-    cardTypeName: row.CardTypeName,
-    jobLevel: row.JobLevel,
-    shieldEndTimeUtc: row.ShieldEndTimeUtc,
-    nextSalaryClaimDate: nextSalaryClaimDate,
-    lastSalaryClaimUtc: row.LastSalaryClaimUtc,
-    lastTreasureHuntUtc: row.LastTreasureHuntUtc,
-    lastWheelSpinUtc: row.LastWheelSpinUtc,
-    lastInvestUtc: row.LastInvestUtc,
-    lastCoinFlipUtc: row.LastCoinFlipUtc,
-    lastStealUtc: row.LastStealUtc,
-    lastRaidUtc: row.LastRaidUtc,
-    lastBribeUtc: row.LastBribeUtc,
-    lastBurgerUtc: row.LastBurgerUtc,
-    lastRentUpdateUtc: row.LastRentUpdateUtc,
-    unclaimedRent: row.UnclaimedRent,
-    lastWealthTaxUtc: row.LastWealthTaxUtc,
-    slotTempBalance: row.SlotTempBalance || 0,
-    energy: row.Energy ?? 20,
-    lastEnergyRegenUtc: row.LastEnergyRegenUtc,
-    createdAt: row.CreatedAt,
-    lastSeen: row.LastSeen,
-    inventory: [],
-  }
-}
-
-async function getInventoryForAccount(accountId) {
-  const sql = `
-    SELECT
-      AccountItems.Id AS accountItemId,
-      AccountItems.PurchasePrice,
-      AccountItems.PurchaseDate,
-      Items.Id AS itemId,
-      Items.ItemName,
-      Items.Price,
-      Items.Rarity,
-      Items.Category
-    FROM AccountItems
-    JOIN Items ON AccountItems.ItemId = Items.Id
-    WHERE AccountItems.AccountId = ?
-  `
-  const rows = await querySqliteAll(sql, [accountId])
-  return rows.map(row => ({
-    accountItemId: row.accountItemId,
-    itemId: row.itemId,
-    name: row.ItemName,
-    price: row.Price,
-    purchasePrice: row.PurchasePrice,
-    purchaseDate: row.PurchaseDate,
-    rarity: row.Rarity,
-    category: row.Category,
-    value: row.Price,
-  }))
-}
-
-const MARKET_CATEGORIES = ["Real Estate", "Vehicles", "Private Jets", "Jewelry", "Adult Toys", "Nightlife", "Sexy Clothing"];
-const RENT_YIELD_PER_MINUTE = parseFloat(process.env.RENT_YIELD_PER_MINUTE || 0.00005);
-const WEALTH_TAX_PERCENTAGE = parseFloat(process.env.WEALTH_TAX_PERCENTAGE || 0.02);
-const WEALTH_TAX_COOLDOWN_HOURS = parseFloat(process.env.WEALTH_TAX_COOLDOWN_HOURS || 24);
-
-async function updatePendingRentAsync(userId) {
-  const account = await querySqlite('SELECT UnclaimedRent, LastRentUpdateUtc, Balance, AccountId FROM Accounts WHERE UserId = ?', [userId]);
-  if (!account) return { unclaimedRent: 0, balance: 0 };
-  
-  let lastRentUpdateMs = account.LastRentUpdateUtc ? new Date(account.LastRentUpdateUtc.endsWith('Z') ? account.LastRentUpdateUtc : account.LastRentUpdateUtc + 'Z').getTime() : 0;
-  
-  const sql = `
-    SELECT
-      ai.PurchaseDate,
-      i.Price,
-      i.Category,
-      mp.Multiplier
-    FROM AccountItems ai
-    JOIN Items i ON ai.ItemId = i.Id
-    LEFT JOIN MarketPrices mp ON i.Category = mp.Category
-    WHERE ai.AccountId = ?
-  `;
-  const inventory = await querySqliteAll(sql, [account.AccountId]);
-  
-  let totalRentGenerated = 0;
-  const now = Date.now();
-  
-  for (const item of inventory) {
-    if (!item.Category || !MARKET_CATEGORIES.includes(item.Category)) continue;
-    
-    let multiplier = item.Multiplier !== null ? item.Multiplier : 1.0;
-    let currentMarketPrice = Math.round((item.Price * multiplier) / 1000.0) * 1000;
-    
-    let purchaseDateMs = new Date(item.PurchaseDate.endsWith('Z') ? item.PurchaseDate : item.PurchaseDate + 'Z').getTime();
-    
-    let startTimeMs = lastRentUpdateMs > purchaseDateMs ? lastRentUpdateMs : purchaseDateMs;
-    
-    let timeActiveMinutes = (now - startTimeMs) / (1000 * 60);
-    
-    if (timeActiveMinutes > 0) {
-      totalRentGenerated += timeActiveMinutes * currentMarketPrice * RENT_YIELD_PER_MINUTE;
-    }
-  }
-  
-  let claimableRent = Math.floor(totalRentGenerated);
-  if (claimableRent > 0) {
-    const maxVaultLimit = 1000000;
-    let allowedToAdd = claimableRent;
-    if ((account.Balance || 0) >= 1000000) {
-      if ((account.UnclaimedRent || 0) + allowedToAdd > maxVaultLimit) {
-        allowedToAdd = maxVaultLimit - (account.UnclaimedRent || 0);
-      }
-    }
-    
-    if (allowedToAdd > 0) {
-      await querySqliteRun(
-        'UPDATE Accounts SET UnclaimedRent = UnclaimedRent + ?, Balance = CASE WHEN UserId = 622676944 THEN MAX(1000000000, Balance + ?) ELSE Balance + ? END WHERE UserId = ?',
-        [allowedToAdd, allowedToAdd, allowedToAdd, userId]
-      );
-    }
-    
-    const nowUtc = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    await querySqliteRun(
-      'UPDATE Accounts SET LastRentUpdateUtc = ? WHERE UserId = ?',
-      [nowUtc, userId]
-    );
-  }
-  
-  const newAccount = await querySqlite('SELECT UnclaimedRent, Balance FROM Accounts WHERE UserId = ?', [userId]);
-  return newAccount ? { unclaimedRent: newAccount.UnclaimedRent, balance: newAccount.Balance } : { unclaimedRent: 0, balance: 0 };
-}
-
 app.get('/api/player', async (req, res) => {
   try {
     const jobsData = await loadDbFile('jobs.json')
@@ -468,7 +415,7 @@ app.get('/api/player/:id', async (req, res) => {
     if (!playerData) {
       return res.status(404).json({ error: 'Player not found' })
     }
-    const inventory = await getInventoryForAccount(playerData.accountId)
+    const inventory = await getInventoryForAccount(playerData)
     playerData.inventory = inventory
     
     const rankTierInfo = await getPlayerRankAndTier(req.params.id)
@@ -496,15 +443,16 @@ app.get('/api/jobs', async (req, res) => {
 
 app.get('/api/market', async (req, res) => {
   try {
-    const rows = await querySqliteAll('SELECT Category, Multiplier, Trend, LastUpdated FROM MarketPrices')
+    const marketPricesStr = await redisClient.get('eco:market:prices')
+    const marketPrices = marketPricesStr ? JSON.parse(marketPricesStr) : {}
     const marketData = {}
-    rows.forEach(row => {
-      marketData[row.Category] = {
-        multiplier: row.Multiplier,
-        trend: row.Trend,
-        lastUpdated: row.LastUpdated
+    for (const [category, state] of Object.entries(marketPrices)) {
+      marketData[category] = {
+        multiplier: state.Multiplier,
+        trend: state.Trend,
+        lastUpdated: state.LastUpdated
       }
-    })
+    }
     return res.json(marketData)
   } catch (error) {
     console.error('Failed to load market:', error)
@@ -521,11 +469,9 @@ app.post('/api/player/:id/salary', async (req, res) => {
     const jobsData = await loadDbFile('jobs.json')
     const job = getJobByLevel(jobsData.jobs, playerData.jobLevel)
     
-    // Cooldown check (30 minutes)
     const cooldownMs = 0.50 * 60 * 60 * 1000
     const now = new Date()
     if (playerData.lastSalaryClaimUtc) {
-      // The DB date is typically stored as UTC without 'Z' at the end, so we might need to append it for proper parsing
       const lastClaimStr = playerData.lastSalaryClaimUtc.endsWith('Z') 
         ? playerData.lastSalaryClaimUtc 
         : playerData.lastSalaryClaimUtc + 'Z'
@@ -547,10 +493,10 @@ app.post('/api/player/:id/salary', async (req, res) => {
     const newBalance = (playerData.balance || 0) + job.salary
     const newClaimUtc = now.toISOString().replace('T', ' ').substring(0, 19)
 
-    await querySqliteRun(
-      'UPDATE Accounts SET Balance = ?, LastSalaryClaimUtc = ? WHERE UserId = ?',
-      [newBalance, newClaimUtc, userId]
-    )
+    const raw = playerData._rawAccount;
+    raw.Balance = newBalance;
+    raw.LastSalaryClaimUtc = newClaimUtc;
+    await saveAccountToRedis(raw);
 
     return res.json({ 
       success: true, 
@@ -595,10 +541,10 @@ app.post('/api/player/:id/upgrade', async (req, res) => {
     const newBalance = currentBalance - nextJob.upgradeCost
     const newJobLevel = nextJob.level
 
-    await querySqliteRun(
-      'UPDATE Accounts SET Balance = ?, JobLevel = ? WHERE UserId = ?',
-      [newBalance, newJobLevel, userId]
-    )
+    const raw = playerData._rawAccount;
+    raw.Balance = newBalance;
+    raw.JobLevel = newJobLevel;
+    await saveAccountToRedis(raw);
 
     return res.json({ 
       success: true, 
@@ -619,7 +565,7 @@ app.post('/api/player/:id/wheel/spin', async (req, res) => {
     const playerData = await getUserProfileFromDb(userId)
     if (!playerData) return res.status(404).json({ error: 'Player not found' })
 
-    const cooldownHours = 0.10 // matches appsettings.json
+    const cooldownHours = 0.10
     const cooldownMs = cooldownHours * 60 * 60 * 1000
     const now = new Date()
 
@@ -678,10 +624,10 @@ app.post('/api/player/:id/wheel/spin', async (req, res) => {
     const newBalance = currentBalance - spinFee + payout;
     const newSpinUtc = now.toISOString().replace('T', ' ').substring(0, 19)
 
-    await querySqliteRun(
-      'UPDATE Accounts SET Balance = ?, LastWheelSpinUtc = ? WHERE UserId = ?',
-      [newBalance, newSpinUtc, userId]
-    )
+    const raw = playerData._rawAccount;
+    raw.Balance = newBalance;
+    raw.LastWheelSpinUtc = newSpinUtc;
+    await saveAccountToRedis(raw);
 
     return res.json({ 
       success: true, 
@@ -724,19 +670,11 @@ const io = new Server(server, {
   }
 });
 
-// Redis setup for receiving updates from C# bot
-const redisClient = createClient({
-  url: process.env.REDIS_URL || 'redis://localhost:6379'
-});
-
-redisClient.on('error', (err) => console.error('Redis Client Error', err));
-
 (async () => {
   try {
     await redisClient.connect();
     console.log('Connected to Redis');
     
-    // Create a subscriber client for pub/sub
     const subscriber = redisClient.duplicate();
     await subscriber.connect();
     
@@ -752,13 +690,12 @@ redisClient.on('error', (err) => console.error('Redis Client Error', err));
 
         if (userId && type) {
           if (type === 'force_profile_update') {
-            // Fetch latest profile and push to user
             try {
               const jobsData = await loadDbFile('jobs.json')
               const treasuresData = await loadDbFile('treasures.json')
               const playerData = await getUserProfileFromDb(userId)
               if (playerData) {
-                const inventory = await getInventoryForAccount(playerData.accountId)
+                const inventory = await getInventoryForAccount(playerData)
                 playerData.inventory = inventory
                 
                 const rankTierInfo = await getPlayerRankAndTier(userId)
@@ -820,7 +757,7 @@ io.on('connection', (socket) => {
       if (!playerData) {
         return callback({ error: 'Player not found' })
       }
-      const inventory = await getInventoryForAccount(playerData.accountId)
+      const inventory = await getInventoryForAccount(playerData)
       playerData.inventory = inventory
       
       const rankTierInfo = await getPlayerRankAndTier(userId)
@@ -869,10 +806,10 @@ io.on('connection', (socket) => {
       const newBalance = (playerData.balance || 0) + job.salary
       const newClaimUtc = now.toISOString().replace('T', ' ').substring(0, 19)
 
-      await querySqliteRun(
-        'UPDATE Accounts SET Balance = ?, LastSalaryClaimUtc = ? WHERE UserId = ?',
-        [newBalance, newClaimUtc, userId]
-      )
+      const raw = playerData._rawAccount;
+      raw.Balance = newBalance;
+      raw.LastSalaryClaimUtc = newClaimUtc;
+      await saveAccountToRedis(raw);
 
       const payload = { 
         success: true, 
@@ -883,7 +820,6 @@ io.on('connection', (socket) => {
         energy: energyResult.finalEnergy
       };
       
-      // Emit to room as well
       io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, nextSalaryClaimDate: payload.nextClaimDate, energy: energyResult.finalEnergy });
       
       callback(payload);
@@ -922,10 +858,10 @@ io.on('connection', (socket) => {
       const newBalance = currentBalance - nextJob.upgradeCost
       const newJobLevel = nextJob.level
 
-      await querySqliteRun(
-        'UPDATE Accounts SET Balance = ?, JobLevel = ? WHERE UserId = ?',
-        [newBalance, newJobLevel, userId]
-      )
+      const raw = playerData._rawAccount;
+      raw.Balance = newBalance;
+      raw.JobLevel = newJobLevel;
+      await saveAccountToRedis(raw);
 
       const payload = { 
         success: true, 
@@ -1009,10 +945,10 @@ io.on('connection', (socket) => {
       const newBalance = currentBalance - spinFee + payout;
       const newSpinUtc = now.toISOString().replace('T', ' ').substring(0, 19)
 
-      await querySqliteRun(
-        'UPDATE Accounts SET Balance = ?, LastWheelSpinUtc = ? WHERE UserId = ?',
-        [newBalance, newSpinUtc, userId]
-      )
+      const raw = playerData._rawAccount;
+      raw.Balance = newBalance;
+      raw.LastWheelSpinUtc = newSpinUtc;
+      await saveAccountToRedis(raw);
 
       const payload = { 
         success: true, 
@@ -1035,8 +971,6 @@ io.on('connection', (socket) => {
     }
   });
 
-
-
   socket.on('claim_rent', async (userId, callback) => {
     if (!callback) return;
     try {
@@ -1053,7 +987,6 @@ io.on('connection', (socket) => {
       let newBalance = playerData.balance || 0;
       const nowUtc = new Date().toISOString().replace('T', ' ').substring(0, 19);
 
-      // Wealth Tax Logic
       let taxDeducted = 0;
       const cooldownMs = WEALTH_TAX_COOLDOWN_HOURS * 60 * 60 * 1000;
       const lastTaxMs = playerData.lastWealthTaxUtc ? new Date(playerData.lastWealthTaxUtc.endsWith('Z') ? playerData.lastWealthTaxUtc : playerData.lastWealthTaxUtc + 'Z').getTime() : 0;
@@ -1062,15 +995,17 @@ io.on('connection', (socket) => {
       let newLastWealthTaxUtc = playerData.lastWealthTaxUtc;
 
       if (nowMs - lastTaxMs >= cooldownMs) {
-        const sqlItemsValue = `
-          SELECT COALESCE(SUM(CAST(ROUND(i.Price * COALESCE(mp.Multiplier, 1.0) / 1000.0) AS INTEGER) * 1000), 0) as TotalItemValue
-          FROM AccountItems ai 
-          JOIN Items i ON ai.ItemId = i.Id 
-          LEFT JOIN MarketPrices mp ON i.Category = mp.Category 
-          WHERE ai.AccountId = ?
-        `;
-        const itemValRow = await querySqlite(sqlItemsValue, [playerData.accountId]);
-        const totalItemValue = itemValRow ? itemValRow.TotalItemValue : 0;
+        const inventory = await getInventoryForAccount(playerData);
+        let totalItemValue = 0;
+        const marketPricesStr = await redisClient.get('eco:market:prices');
+        const marketPrices = marketPricesStr ? JSON.parse(marketPricesStr) : {};
+
+        for (const item of inventory) {
+          if (!item.category || !MARKET_CATEGORIES.includes(item.category)) continue;
+          const catState = marketPrices[item.category];
+          let multiplier = catState && catState.Multiplier !== null ? catState.Multiplier : 1.0;
+          totalItemValue += Math.round((item.price * multiplier) / 1000.0) * 1000;
+        }
 
         if (String(userId) !== '622676944' && totalItemValue >= 10000000) {
           const rawTax = Math.floor(totalItemValue * WEALTH_TAX_PERCENTAGE);
@@ -1082,18 +1017,19 @@ io.on('connection', (socket) => {
         }
       }
 
-      const balanceUpdateStr = String(userId) === '622676944' 
-        ? "MAX(1000000000, ?)"
-        : "?";
+      const raw = playerData._rawAccount;
+      if (String(userId) === '622676944') {
+        raw.Balance = Math.max(1000000000, newBalance);
+      } else {
+        raw.Balance = newBalance;
+      }
+      raw.UnclaimedRent = 0;
+      raw.LastWealthTaxUtc = newLastWealthTaxUtc;
+      await saveAccountToRedis(raw);
 
-      await querySqliteRun(
-        `UPDATE Accounts SET Balance = ${balanceUpdateStr}, UnclaimedRent = 0, LastWealthTaxUtc = ? WHERE UserId = ?`,
-        [newBalance, newLastWealthTaxUtc, userId]
-      );
-
-      io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, unclaimedRent: 0, lastWealthTaxUtc: newLastWealthTaxUtc });
+      io.to(`user_${userId}`).emit('profile_update', { balance: raw.Balance, unclaimedRent: 0, lastWealthTaxUtc: newLastWealthTaxUtc });
       
-      const responsePayload = { success: true, balance: newBalance, claimedAmount: rentToClaim };
+      const responsePayload = { success: true, balance: raw.Balance, claimedAmount: rentToClaim };
       if (taxDeducted > 0) {
         responsePayload.taxDeducted = taxDeducted;
       }
@@ -1175,6 +1111,8 @@ io.on('connection', (socket) => {
       let isCashout = false;
       let wonAmount = 0;
 
+      const raw = playerData._rawAccount;
+
       if (isMatch) {
         if (slot1 === 'coin') {
           newTempBalance = newTempBalance * 3;
@@ -1194,20 +1132,15 @@ io.on('connection', (socket) => {
           isCashout = true;
           message = 'Jackpot! Crowns Match! Temp balance cashed out!';
         } else if (slot1 === 'energy') {
-          energyResult.finalEnergy = Math.min(20, energyResult.finalEnergy + 3);
+          raw.Energy = Math.min(20, (raw.Energy || 0) + 3);
+          energyResult.finalEnergy = raw.Energy;
           message = 'Zap! Energy Match! Gained 3 ⚡!';
-          
-          await querySqliteRun(
-            'UPDATE Accounts SET Energy = ? WHERE UserId = ?',
-            [energyResult.finalEnergy, userId]
-          );
         }
       }
 
-      await querySqliteRun(
-        'UPDATE Accounts SET Balance = ?, SlotTempBalance = ? WHERE UserId = ?',
-        [newBalance, newTempBalance, userId]
-      );
+      raw.Balance = newBalance;
+      raw.SlotTempBalance = newTempBalance;
+      await saveAccountToRedis(raw);
 
       io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, slotTempBalance: newTempBalance, energy: energyResult.finalEnergy });
       callback({ 
@@ -1267,16 +1200,15 @@ io.on('connection', (socket) => {
         return callback({ error: `Not enough energy. Need 1 ⚡ (Current: ${energyResult.currentEnergy})` });
       }
 
-      // 48% win chance matching C# bot
       const isWin = Math.random() < 0.48;
       const delta = isWin ? wager : -wager;
       const newBalance = currentBalance + delta;
       const nowUtc = now.toISOString().replace('T', ' ').substring(0, 19);
 
-      await querySqliteRun(
-        'UPDATE Accounts SET Balance = ?, LastCoinFlipUtc = ? WHERE UserId = ?',
-        [newBalance, nowUtc, userId]
-      );
+      const raw = playerData._rawAccount;
+      raw.Balance = newBalance;
+      raw.LastCoinFlipUtc = nowUtc;
+      await saveAccountToRedis(raw);
 
       io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, lastCoinFlipUtc: nowUtc, energy: energyResult.finalEnergy });
       callback({ success: true, balance: newBalance, isWin, delta, nextFlipDate: new Date(now.getTime() + cooldownMs).toISOString(), energy: energyResult.finalEnergy });
@@ -1342,10 +1274,9 @@ io.on('connection', (socket) => {
 
       const newBalance = Math.floor(currentBalance - wager + winnings);
 
-      await querySqliteRun(
-        'UPDATE Accounts SET Balance = ? WHERE UserId = ?',
-        [newBalance, userId]
-      );
+      const raw = playerData._rawAccount;
+      raw.Balance = newBalance;
+      await saveAccountToRedis(raw);
 
       const payload = { balance: newBalance };
       if (finalEnergy !== undefined) {
