@@ -67,17 +67,6 @@ function getJobByLevel(jobs, level) {
   return jobs.find(job => job.level === level) || jobs[0]
 }
 
-function getTierDisplay(tier) {
-  switch (tier) {
-    case 0: return "👑 Emperor";
-    case 1: return "💎 King";
-    case 2: return "🥈 Prince";
-    case 3: return "🥉 Duke";
-    case 4: return "🎖️ Baron";
-    case 5: return "🔰 Commoner";
-    default: return "🔰 Commoner";
-  }
-}
 
 // Redis Client
 const redisClient = createClient({
@@ -196,8 +185,8 @@ async function getUserProfileFromDb(userId) {
       cardTypeName: account.CardTypeId === 2 ? "MasterCard" : account.CardTypeId === 3 ? "Amex" : "Visa",
       jobLevel: account.JobLevel || 1,
       rank: playerStats.Rank || -1,
-      tier: playerStats.Tier || 5,
-      tierName: playerStats.TierName || "🔰 Commoner",
+      tier: playerStats.Tier ?? 10,
+      tierName: playerStats.TierName || "🔰 Beggar",
       shieldEndTimeUtc: account.ShieldEndTimeUtc || null,
       nextSalaryClaimDate,
       lastSalaryClaimUtc: account.LastSalaryClaimUtc || null,
@@ -234,42 +223,6 @@ async function getUserProfileFromDb(userId) {
   }
 }
 
-async function getPlayerRankAndTier(userId) {
-  if (String(userId) === '622676944') {
-    return { tier: 0, rank: 1 };
-  }
-  try {
-    const sql = `
-      SELECT 
-        (SELECT COUNT(*) FROM Accounts WHERE UserId != 622676944) AS total,
-        (SELECT COUNT(*) FROM Accounts WHERE UserId != 622676944 AND Balance < COALESCE((SELECT Balance FROM Accounts WHERE UserId = $1), 0)) AS strictless,
-        (SELECT COUNT(*) FROM Accounts WHERE UserId != 622676944 AND Balance = COALESCE((SELECT Balance FROM Accounts WHERE UserId = $1), 0)) AS equal,
-        (SELECT COUNT(*) FROM Accounts WHERE UserId != 622676944 AND Balance > COALESCE((SELECT Balance FROM Accounts WHERE UserId = $1), 0)) AS strictgreater
-    `;
-    const res = await pool.query(sql, [userId]);
-    if (!res.rows || res.rows.length === 0 || parseInt(res.rows[0].total) === 0) return { tier: 5, rank: 1 };
-
-    const row = res.rows[0];
-    const total = parseInt(row.total) || 1;
-    const strictLess = parseInt(row.strictless) || 0;
-    const equal = parseInt(row.equal) || 0;
-    const strictGreater = parseInt(row.strictgreater) || 0;
-
-    const percentile = (strictLess + 0.5 * equal) / total;
-
-    let tier = 5;
-    const tierRes = await pool.query('SELECT Level, MinPercentile FROM Tiers ORDER BY Level DESC');
-    for (const t of tierRes.rows) {
-      if (percentile >= t.minpercentile) {
-        tier = t.level;
-      }
-    }
-    return { tier, rank: strictGreater + 1 };
-  } catch (err) {
-    console.error("Failed to get rank and tier:", err);
-    return { tier: 5, rank: -1 };
-  }
-}
 
 async function consumeEnergy(userId, amount) {
   const profile = await getUserProfileFromDb(userId);
@@ -468,8 +421,8 @@ function buildPlayerInfo(jobs, playerData = null) {
     jobLevel: job.level,
     jobTitle: job.title,
     jobSalary: job.salary,
-    tier: source.tier ?? 5,
-    tierName: source.tierName ?? "🔰 Commoner",
+    tier: source.tier ?? 10,
+    tierName: source.tierName ?? "🔰 Beggar",
     rank: source.rank ?? -1,
     shields,
     shieldEndTimeUtc: source.shieldEndTimeUtc,
@@ -526,10 +479,6 @@ app.get('/api/player/:id', async (req, res) => {
     const inventory = await getInventoryForAccount(playerData)
     playerData.inventory = inventory
 
-    const rankTierInfo = await getPlayerRankAndTier(req.params.id)
-    playerData.tier = rankTierInfo.tier
-    playerData.tierName = getTierDisplay(rankTierInfo.tier)
-    playerData.rank = rankTierInfo.rank
 
     const playerInfo = buildPlayerInfo(jobsData.jobs, playerData)
     return res.json(playerInfo)
@@ -799,10 +748,6 @@ const io = new Server(server, {
                 const inventory = await getInventoryForAccount(playerData)
                 playerData.inventory = inventory
 
-                const rankTierInfo = await getPlayerRankAndTier(userId)
-                playerData.tier = rankTierInfo.tier
-                playerData.tierName = getTierDisplay(rankTierInfo.tier)
-                playerData.rank = rankTierInfo.rank
 
                 const playerInfo = buildPlayerInfo(jobsData.jobs, playerData)
                 io.to(`user_${userId}`).emit('profile_update', playerInfo);
@@ -860,10 +805,6 @@ io.on('connection', (socket) => {
       const inventory = await getInventoryForAccount(playerData)
       playerData.inventory = inventory
 
-      const rankTierInfo = await getPlayerRankAndTier(userId)
-      playerData.tier = rankTierInfo.tier
-      playerData.tierName = getTierDisplay(rankTierInfo.tier)
-      playerData.rank = rankTierInfo.rank
 
       const playerInfo = buildPlayerInfo(jobsData.jobs, playerData)
       callback({ success: true, data: playerInfo })
