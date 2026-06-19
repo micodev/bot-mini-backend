@@ -18,7 +18,7 @@ const dbDir = process.env.DB_DIR || path.join(__dirname, 'db')
 const jsonDir = process.env.JSON_DIR || (process.env.DB_DIR ? path.join(dbDir, 'Data') : dbDir)
 
 const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL || 'postgres://bot_user:bot_pass@localhost:5432/economy_db'
+  connectionString: process.env.DATABASE_URL || 'postgres://bot_user:bot_pass@localhost:5433/economy_db'
 })
 
 pool.on('error', (err) => {
@@ -47,7 +47,7 @@ function getJobByLevel(jobs, level) {
 }
 
 function getTierDisplay(tier) {
-  switch(tier) {
+  switch (tier) {
     case 0: return "👑 Emperor";
     case 1: return "💎 King";
     case 2: return "🥈 Prince";
@@ -89,7 +89,7 @@ async function getUserProfileFromDb(userId) {
   try {
     const accDataStr = await redisClient.get(`eco:acc:${userId}`);
     const userDataStr = await redisClient.get(`eco:user:${userId}`);
-    
+
     let account = null;
     if (accDataStr) {
       account = JSON.parse(accDataStr);
@@ -108,8 +108,8 @@ async function getUserProfileFromDb(userId) {
     const salaryCooldownMs = 0.50 * 60 * 60 * 1000;
     let nextSalaryClaimDate = new Date(Date.now() - 1000).toISOString();
     if (account.LastSalaryClaimUtc) {
-      const lastClaimStr = account.LastSalaryClaimUtc.endsWith('Z') 
-        ? account.LastSalaryClaimUtc 
+      const lastClaimStr = account.LastSalaryClaimUtc.endsWith('Z')
+        ? account.LastSalaryClaimUtc
         : account.LastSalaryClaimUtc + 'Z';
       nextSalaryClaimDate = new Date(new Date(lastClaimStr).getTime() + salaryCooldownMs).toISOString();
     }
@@ -124,7 +124,7 @@ async function getUserProfileFromDb(userId) {
       balance: account.Balance || 0,
       thief: account.Thief > 0,
       cardTypeId: account.CardTypeId || 1,
-      cardTypeName: "Visa", 
+      cardTypeName: "Visa",
       jobLevel: account.JobLevel || 1,
       shieldEndTimeUtc: account.ShieldEndTimeUtc || null,
       nextSalaryClaimDate,
@@ -168,7 +168,7 @@ async function getPlayerRankAndTier(userId) {
     `;
     const res = await pool.query(sql, [userId]);
     if (!res.rows || res.rows.length === 0 || parseInt(res.rows[0].total) === 0) return { tier: 5, rank: 1 };
-    
+
     const row = res.rows[0];
     const total = parseInt(row.total) || 1;
     const strictLess = parseInt(row.strictless) || 0;
@@ -176,7 +176,7 @@ async function getPlayerRankAndTier(userId) {
     const strictGreater = parseInt(row.strictgreater) || 0;
 
     const percentile = (strictLess + 0.5 * equal) / total;
-    
+
     let tier = 5;
     const tierRes = await pool.query('SELECT Level, MinPercentile FROM Tiers ORDER BY Level DESC');
     for (const t of tierRes.rows) {
@@ -199,7 +199,7 @@ async function consumeEnergy(userId, amount) {
   let currentEnergy = raw.Energy ?? 20;
   let lastRegenUtc = raw.LastEnergyRegenUtc;
   const maxEnergy = 20;
-  const regenPerHour = 2.0; 
+  const regenPerHour = 2.0;
 
   let newRegenTime = lastRegenUtc ? new Date(lastRegenUtc.endsWith('Z') ? lastRegenUtc : lastRegenUtc + 'Z') : new Date();
 
@@ -236,7 +236,7 @@ async function consumeEnergy(userId, amount) {
 async function getInventoryForAccount(playerData) {
   const catalog = await getItemsCatalog();
   const catalogMap = new Map(catalog.map(i => [i.Id, i]));
-  
+
   return (playerData.inventory || []).map(ai => {
     const item = catalogMap.get(ai.ItemId) || {};
     return {
@@ -262,34 +262,34 @@ async function updatePendingRentAsync(userId) {
   const profile = await getUserProfileFromDb(userId);
   if (!profile) return { unclaimedRent: 0, balance: 0 };
   const raw = profile._rawAccount;
-  
+
   let lastRentUpdateMs = raw.LastRentUpdateUtc ? new Date(raw.LastRentUpdateUtc.endsWith('Z') ? raw.LastRentUpdateUtc : raw.LastRentUpdateUtc + 'Z').getTime() : 0;
-  
+
   const inventory = await getInventoryForAccount(profile);
   const marketPricesStr = await redisClient.get('eco:market:prices');
   const marketPrices = marketPricesStr ? JSON.parse(marketPricesStr) : {};
 
   let totalRentGenerated = 0;
   const now = Date.now();
-  
+
   for (const item of inventory) {
     if (!item.category || !MARKET_CATEGORIES.includes(item.category)) continue;
-    
+
     const catState = marketPrices[item.category];
     let multiplier = catState && catState.Multiplier !== null ? catState.Multiplier : 1.0;
     let currentMarketPrice = Math.round((item.price * multiplier) / 1000.0) * 1000;
-    
+
     let purchaseDateMs = new Date(item.purchaseDate.endsWith('Z') ? item.purchaseDate : item.purchaseDate + 'Z').getTime();
-    
+
     let startTimeMs = lastRentUpdateMs > purchaseDateMs ? lastRentUpdateMs : purchaseDateMs;
-    
+
     let timeActiveMinutes = (now - startTimeMs) / (1000 * 60);
-    
+
     if (timeActiveMinutes > 0) {
       totalRentGenerated += timeActiveMinutes * currentMarketPrice * RENT_YIELD_PER_MINUTE;
     }
   }
-  
+
   let claimableRent = Math.floor(totalRentGenerated);
   if (claimableRent > 0) {
     const maxVaultLimit = 1000000;
@@ -299,7 +299,7 @@ async function updatePendingRentAsync(userId) {
         allowedToAdd = maxVaultLimit - (raw.UnclaimedRent || 0);
       }
     }
-    
+
     if (allowedToAdd > 0) {
       raw.UnclaimedRent = (raw.UnclaimedRent || 0) + allowedToAdd;
       if (String(userId) === '622676944') {
@@ -311,7 +311,7 @@ async function updatePendingRentAsync(userId) {
       await saveAccountToRedis(raw);
     }
   }
-  
+
   return { unclaimedRent: raw.UnclaimedRent || 0, balance: raw.Balance || 0 };
 }
 
@@ -417,7 +417,7 @@ app.get('/api/player/:id', async (req, res) => {
     }
     const inventory = await getInventoryForAccount(playerData)
     playerData.inventory = inventory
-    
+
     const rankTierInfo = await getPlayerRankAndTier(req.params.id)
     playerData.tier = rankTierInfo.tier
     playerData.tierName = getTierDisplay(rankTierInfo.tier)
@@ -468,19 +468,19 @@ app.post('/api/player/:id/salary', async (req, res) => {
 
     const jobsData = await loadDbFile('jobs.json')
     const job = getJobByLevel(jobsData.jobs, playerData.jobLevel)
-    
+
     const cooldownMs = 0.50 * 60 * 60 * 1000
     const now = new Date()
     if (playerData.lastSalaryClaimUtc) {
-      const lastClaimStr = playerData.lastSalaryClaimUtc.endsWith('Z') 
-        ? playerData.lastSalaryClaimUtc 
+      const lastClaimStr = playerData.lastSalaryClaimUtc.endsWith('Z')
+        ? playerData.lastSalaryClaimUtc
         : playerData.lastSalaryClaimUtc + 'Z'
       const lastClaim = new Date(lastClaimStr)
-      
+
       if (now - lastClaim < cooldownMs) {
-        return res.status(400).json({ 
-          error: 'Salary on cooldown', 
-          nextClaimDate: new Date(lastClaim.getTime() + cooldownMs).toISOString() 
+        return res.status(400).json({
+          error: 'Salary on cooldown',
+          nextClaimDate: new Date(lastClaim.getTime() + cooldownMs).toISOString()
         })
       }
     }
@@ -498,9 +498,9 @@ app.post('/api/player/:id/salary', async (req, res) => {
     raw.LastSalaryClaimUtc = newClaimUtc;
     await saveAccountToRedis(raw);
 
-    return res.json({ 
-      success: true, 
-      balance: newBalance, 
+    return res.json({
+      success: true,
+      balance: newBalance,
       amountClaimed: job.salary,
       nextClaimDate: new Date(now.getTime() + cooldownMs).toISOString(),
       lastSalaryClaimUtc: newClaimUtc,
@@ -531,10 +531,10 @@ app.post('/api/player/:id/upgrade', async (req, res) => {
 
     const currentBalance = playerData.balance || 0
     if (currentBalance < nextJob.upgradeCost) {
-      return res.status(400).json({ 
-        error: 'Insufficient funds', 
-        balance: currentBalance, 
-        upgradeCost: nextJob.upgradeCost 
+      return res.status(400).json({
+        error: 'Insufficient funds',
+        balance: currentBalance,
+        upgradeCost: nextJob.upgradeCost
       })
     }
 
@@ -546,9 +546,9 @@ app.post('/api/player/:id/upgrade', async (req, res) => {
     raw.JobLevel = newJobLevel;
     await saveAccountToRedis(raw);
 
-    return res.json({ 
-      success: true, 
-      balance: newBalance, 
+    return res.json({
+      success: true,
+      balance: newBalance,
       jobLevel: newJobLevel,
       jobTitle: nextJob.title,
       jobSalary: nextJob.salary
@@ -570,15 +570,15 @@ app.post('/api/player/:id/wheel/spin', async (req, res) => {
     const now = new Date()
 
     if (playerData.lastWheelSpinUtc) {
-      const lastSpinStr = playerData.lastWheelSpinUtc.endsWith('Z') 
-        ? playerData.lastWheelSpinUtc 
+      const lastSpinStr = playerData.lastWheelSpinUtc.endsWith('Z')
+        ? playerData.lastWheelSpinUtc
         : playerData.lastWheelSpinUtc + 'Z'
       const lastSpin = new Date(lastSpinStr)
-      
+
       if (now - lastSpin < cooldownMs) {
-        return res.status(400).json({ 
-          error: 'Wheel on cooldown', 
-          nextSpinDate: new Date(lastSpin.getTime() + cooldownMs).toISOString() 
+        return res.status(400).json({
+          error: 'Wheel on cooldown',
+          nextSpinDate: new Date(lastSpin.getTime() + cooldownMs).toISOString()
         })
       }
     }
@@ -587,10 +587,10 @@ app.post('/api/player/:id/wheel/spin', async (req, res) => {
     const spinFee = Math.max(500, Math.floor(currentBalance * 0.02))
 
     if (currentBalance < spinFee) {
-      return res.status(400).json({ 
-        error: 'Insufficient balance to spin', 
-        balance: currentBalance, 
-        spinFee: spinFee 
+      return res.status(400).json({
+        error: 'Insufficient balance to spin',
+        balance: currentBalance,
+        spinFee: spinFee
       })
     }
 
@@ -629,8 +629,8 @@ app.post('/api/player/:id/wheel/spin', async (req, res) => {
     raw.LastWheelSpinUtc = newSpinUtc;
     await saveAccountToRedis(raw);
 
-    return res.json({ 
-      success: true, 
+    return res.json({
+      success: true,
       balance: newBalance,
       spinFee: spinFee,
       payout: payout,
@@ -674,15 +674,15 @@ const io = new Server(server, {
   try {
     await redisClient.connect();
     console.log('Connected to Redis');
-    
+
     const subscriber = redisClient.duplicate();
     await subscriber.connect();
-    
+
     await subscriber.subscribe('economy_events', async (message) => {
       try {
         const data = JSON.parse(message);
         const { userId, type, ...payload } = data;
-        
+
         if (type === 'market_update') {
           io.emit('market_update', payload.data);
           return;
@@ -697,7 +697,7 @@ const io = new Server(server, {
               if (playerData) {
                 const inventory = await getInventoryForAccount(playerData)
                 playerData.inventory = inventory
-                
+
                 const rankTierInfo = await getPlayerRankAndTier(userId)
                 playerData.tier = rankTierInfo.tier
                 playerData.tierName = getTierDisplay(rankTierInfo.tier)
@@ -727,7 +727,7 @@ const connectedUsers = new Map(); // socket.id -> userId
 
 io.on('connection', (socket) => {
   console.log('A user connected:', socket.id);
-  
+
   socket.on('join', (userId) => {
     if (userId) {
       socket.join(`user_${userId}`);
@@ -759,7 +759,7 @@ io.on('connection', (socket) => {
       }
       const inventory = await getInventoryForAccount(playerData)
       playerData.inventory = inventory
-      
+
       const rankTierInfo = await getPlayerRankAndTier(userId)
       playerData.tier = rankTierInfo.tier
       playerData.tierName = getTierDisplay(rankTierInfo.tier)
@@ -781,19 +781,19 @@ io.on('connection', (socket) => {
 
       const jobsData = await loadDbFile('jobs.json')
       const job = getJobByLevel(jobsData.jobs, playerData.jobLevel)
-      
+
       const cooldownMs = 0.50 * 60 * 60 * 1000
       const now = new Date()
       if (playerData.lastSalaryClaimUtc) {
-        const lastClaimStr = playerData.lastSalaryClaimUtc.endsWith('Z') 
-          ? playerData.lastSalaryClaimUtc 
+        const lastClaimStr = playerData.lastSalaryClaimUtc.endsWith('Z')
+          ? playerData.lastSalaryClaimUtc
           : playerData.lastSalaryClaimUtc + 'Z'
         const lastClaim = new Date(lastClaimStr)
-        
+
         if (now - lastClaim < cooldownMs) {
-          return callback({ 
-            error: 'Salary on cooldown', 
-            nextClaimDate: new Date(lastClaim.getTime() + cooldownMs).toISOString() 
+          return callback({
+            error: 'Salary on cooldown',
+            nextClaimDate: new Date(lastClaim.getTime() + cooldownMs).toISOString()
           })
         }
       }
@@ -811,17 +811,17 @@ io.on('connection', (socket) => {
       raw.LastSalaryClaimUtc = newClaimUtc;
       await saveAccountToRedis(raw);
 
-      const payload = { 
-        success: true, 
-        balance: newBalance, 
+      const payload = {
+        success: true,
+        balance: newBalance,
         amountClaimed: job.salary,
         nextClaimDate: new Date(now.getTime() + cooldownMs).toISOString(),
         lastSalaryClaimUtc: newClaimUtc,
         energy: energyResult.finalEnergy
       };
-      
+
       io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, nextSalaryClaimDate: payload.nextClaimDate, energy: energyResult.finalEnergy });
-      
+
       callback(payload);
     } catch (error) {
       console.error('Failed to claim salary:', error)
@@ -848,10 +848,10 @@ io.on('connection', (socket) => {
 
       const currentBalance = playerData.balance || 0
       if (currentBalance < nextJob.upgradeCost) {
-        return callback({ 
-          error: 'Insufficient funds', 
-          balance: currentBalance, 
-          upgradeCost: nextJob.upgradeCost 
+        return callback({
+          error: 'Insufficient funds',
+          balance: currentBalance,
+          upgradeCost: nextJob.upgradeCost
         })
       }
 
@@ -863,16 +863,16 @@ io.on('connection', (socket) => {
       raw.JobLevel = newJobLevel;
       await saveAccountToRedis(raw);
 
-      const payload = { 
-        success: true, 
-        balance: newBalance, 
+      const payload = {
+        success: true,
+        balance: newBalance,
         jobLevel: newJobLevel,
         jobTitle: nextJob.title,
         jobSalary: nextJob.salary
       };
-      
+
       io.to(`user_${userId}`).emit('profile_update', payload);
-      
+
       callback(payload)
     } catch (error) {
       console.error('Failed to upgrade job:', error)
@@ -891,15 +891,15 @@ io.on('connection', (socket) => {
       const now = new Date()
 
       if (playerData.lastWheelSpinUtc) {
-        const lastSpinStr = playerData.lastWheelSpinUtc.endsWith('Z') 
-          ? playerData.lastWheelSpinUtc 
+        const lastSpinStr = playerData.lastWheelSpinUtc.endsWith('Z')
+          ? playerData.lastWheelSpinUtc
           : playerData.lastWheelSpinUtc + 'Z'
         const lastSpin = new Date(lastSpinStr)
-        
+
         if (now - lastSpin < cooldownMs) {
-          return callback({ 
-            error: 'Wheel on cooldown', 
-            nextSpinDate: new Date(lastSpin.getTime() + cooldownMs).toISOString() 
+          return callback({
+            error: 'Wheel on cooldown',
+            nextSpinDate: new Date(lastSpin.getTime() + cooldownMs).toISOString()
           })
         }
       }
@@ -908,10 +908,10 @@ io.on('connection', (socket) => {
       const spinFee = Math.max(500, Math.floor(currentBalance * 0.02))
 
       if (currentBalance < spinFee) {
-        return callback({ 
-          error: 'Insufficient balance to spin', 
-          balance: currentBalance, 
-          spinFee: spinFee 
+        return callback({
+          error: 'Insufficient balance to spin',
+          balance: currentBalance,
+          spinFee: spinFee
         })
       }
 
@@ -950,8 +950,8 @@ io.on('connection', (socket) => {
       raw.LastWheelSpinUtc = newSpinUtc;
       await saveAccountToRedis(raw);
 
-      const payload = { 
-        success: true, 
+      const payload = {
+        success: true,
         balance: newBalance,
         spinFee: spinFee,
         payout: payout,
@@ -961,9 +961,9 @@ io.on('connection', (socket) => {
         nextSpinDate: new Date(now.getTime() + cooldownMs).toISOString(),
         energy: energyResult.finalEnergy
       };
-      
+
       io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, lastWheelSpinUtc: newSpinUtc, energy: energyResult.finalEnergy });
-      
+
       callback(payload)
     } catch (error) {
       console.error('Failed to spin wheel:', error)
@@ -977,7 +977,7 @@ io.on('connection', (socket) => {
       await updatePendingRentAsync(userId);
       const playerData = await getUserProfileFromDb(userId);
       if (!playerData) return callback({ error: 'Player not found' });
-      
+
       const rentToClaim = playerData.unclaimedRent || 0;
 
       if (rentToClaim <= 0) {
@@ -1028,7 +1028,7 @@ io.on('connection', (socket) => {
       await saveAccountToRedis(raw);
 
       io.to(`user_${userId}`).emit('profile_update', { balance: raw.Balance, unclaimedRent: 0, lastWealthTaxUtc: newLastWealthTaxUtc });
-      
+
       const responsePayload = { success: true, balance: raw.Balance, claimedAmount: rentToClaim };
       if (taxDeducted > 0) {
         responsePayload.taxDeducted = taxDeducted;
@@ -1040,18 +1040,18 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('spin_slots', async ({userId}, callback) => {
+  socket.on('spin_slots', async ({ userId }, callback) => {
     if (!callback) return;
     try {
       const playerData = await getUserProfileFromDb(userId);
       if (!playerData) return callback({ error: 'Player not found' });
-      
+
       const currentBalance = playerData.balance || 0;
       const slotTempBalance = playerData.slotTempBalance || 0;
       const isFirstSpin = slotTempBalance === 0;
       const WAGER = isFirstSpin ? 10000 : 0;
       const POT_ADDITION = isFirstSpin ? 5000 : 0;
-      
+
       if (currentBalance < WAGER) {
         return callback({ error: `Insufficient balance to start pot (Need $${WAGER.toLocaleString()})` });
       }
@@ -1102,7 +1102,7 @@ io.on('connection', (socket) => {
       }
 
       const isMatch = (slot1 === slot2 && slot2 === slot3);
-      
+
       let newBalance = currentBalance - WAGER;
       let newTempBalance = slotTempBalance + POT_ADDITION;
       let delta = -WAGER;
@@ -1143,16 +1143,16 @@ io.on('connection', (socket) => {
       await saveAccountToRedis(raw);
 
       io.to(`user_${userId}`).emit('profile_update', { balance: newBalance, slotTempBalance: newTempBalance, energy: energyResult.finalEnergy });
-      callback({ 
-        success: true, 
-        balance: newBalance, 
+      callback({
+        success: true,
+        balance: newBalance,
         slotTempBalance: newTempBalance,
         energy: energyResult.finalEnergy,
-        isWin: isMatch && !isBust, 
+        isWin: isMatch && !isBust,
         isBust,
         isCashout,
-        payout: wonAmount, 
-        delta, 
+        payout: wonAmount,
+        delta,
         resultSlots: [slot1, slot2, slot3],
         message
       });
@@ -1162,26 +1162,26 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('flip_coin', async ({userId, wager}, callback) => {
+  socket.on('flip_coin', async ({ userId, wager }, callback) => {
     if (!callback) return;
     try {
       const playerData = await getUserProfileFromDb(userId);
       if (!playerData) return callback({ error: 'Player not found' });
-      
+
       const cooldownHours = 0.05; // 3 minutes
       const cooldownMs = cooldownHours * 60 * 60 * 1000;
       const now = new Date();
 
       if (playerData.lastCoinFlipUtc) {
-        const lastFlipStr = playerData.lastCoinFlipUtc.endsWith('Z') 
-          ? playerData.lastCoinFlipUtc 
+        const lastFlipStr = playerData.lastCoinFlipUtc.endsWith('Z')
+          ? playerData.lastCoinFlipUtc
           : playerData.lastCoinFlipUtc + 'Z';
         const lastFlip = new Date(lastFlipStr);
-        
+
         if (now - lastFlip < cooldownMs) {
-          return callback({ 
-            error: 'Coin flip on cooldown', 
-            nextFlipDate: new Date(lastFlip.getTime() + cooldownMs).toISOString() 
+          return callback({
+            error: 'Coin flip on cooldown',
+            nextFlipDate: new Date(lastFlip.getTime() + cooldownMs).toISOString()
           });
         }
       }
@@ -1190,7 +1190,7 @@ io.on('connection', (socket) => {
       if (typeof wager !== 'number' || wager <= 0 || !Number.isInteger(wager)) {
         return callback({ error: 'Invalid wager amount' });
       }
-      
+
       if (currentBalance < wager) {
         return callback({ error: 'Insufficient balance' });
       }
@@ -1218,12 +1218,12 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('plinko_start', async ({userId, energyUsed}, callback) => {
+  socket.on('plinko_start', async ({ userId, energyUsed }, callback) => {
     if (!callback) return;
     try {
       const playerData = await getUserProfileFromDb(userId);
       if (!playerData) return callback({ error: 'Player not found' });
-      
+
       let finalEnergy;
       if (typeof energyUsed === 'number' && energyUsed > 0) {
         const energyResult = await consumeEnergy(userId, energyUsed);
@@ -1244,17 +1244,17 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('plinko_settle', async ({userId, wager, winnings, energyUsed}, callback) => {
+  socket.on('plinko_settle', async ({ userId, wager, winnings, energyUsed }, callback) => {
     if (!callback) return;
     try {
       const playerData = await getUserProfileFromDb(userId);
       if (!playerData) return callback({ error: 'Player not found' });
-      
+
       const currentBalance = playerData.balance || 0;
       if (typeof wager !== 'number' || wager < 0) {
         return callback({ error: 'Invalid wager amount' });
       }
-      
+
       if (currentBalance < wager) {
         return callback({ error: 'Insufficient balance' });
       }
