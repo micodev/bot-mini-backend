@@ -45,10 +45,22 @@ app.use((req, res, next) => {
   next()
 })
 
-async function loadDbFile(filename) {
-  const filePath = path.join(jsonDir, filename)
-  const content = await fs.readFile(filePath, 'utf-8')
-  return JSON.parse(content)
+async function getJobsAsync() {
+  const jobsDataStr = await redisClient.get('eco:jobs');
+  if (jobsDataStr) {
+    return JSON.parse(jobsDataStr);
+  }
+
+  const res = await pool.query('SELECT Level as level, Title as title, Salary as salary, UpgradeCost as "upgradeCost" FROM Jobs ORDER BY Level ASC');
+  const jobsData = { jobs: res.rows.map(row => ({
+    level: row.level,
+    title: row.title,
+    salary: parseInt(row.salary),
+    upgradeCost: parseInt(row.upgradeCost)
+  }))};
+
+  await redisClient.set('eco:jobs', JSON.stringify(jobsData));
+  return jobsData;
 }
 
 function getJobByLevel(jobs, level) {
@@ -123,6 +135,12 @@ async function getUserProfileFromDb(userId) {
       }
     }
 
+    const playerStatsStr = await redisClient.hGet('eco:player_stats', String(userId));
+    let playerStats = {};
+    if (playerStatsStr) {
+      playerStats = JSON.parse(playerStatsStr);
+    }
+
     return {
       accountId: account.AccountId || 0,
       id: String(userId),
@@ -136,6 +154,9 @@ async function getUserProfileFromDb(userId) {
       cardTypeId: account.CardTypeId || 1,
       cardTypeName: account.CardTypeId === 2 ? "MasterCard" : account.CardTypeId === 3 ? "Amex" : "Visa",
       jobLevel: account.JobLevel || 1,
+      rank: playerStats.Rank || -1,
+      tier: playerStats.Tier || 5,
+      tierName: playerStats.TierName || "🔰 Commoner",
       shieldEndTimeUtc: account.ShieldEndTimeUtc || null,
       nextSalaryClaimDate,
       lastSalaryClaimUtc: account.LastSalaryClaimUtc || null,
@@ -354,7 +375,7 @@ async function updatePendingRentAsync(userId) {
   return { unclaimedRent: raw.UnclaimedRent || 0, balance: raw.Balance || 0 };
 }
 
-function buildPlayerInfo(jobs, treasures, playerData = null) {
+function buildPlayerInfo(jobs, playerData = null) {
   const defaultPlayer = {
     id: 'demo-player-1',
     name: 'Demo Player',
@@ -444,9 +465,8 @@ function buildPlayerInfo(jobs, treasures, playerData = null) {
 
 app.get('/api/player', async (req, res) => {
   try {
-    const jobsData = await loadDbFile('jobs.json')
-    const treasuresData = await loadDbFile('treasures.json')
-    const playerInfo = buildPlayerInfo(jobsData.jobs, treasuresData.treasures)
+    const jobsData = await getJobsAsync()
+    const playerInfo = buildPlayerInfo(jobsData.jobs)
     return res.json(playerInfo)
   } catch (error) {
     console.error('Failed to load player info:', error)
@@ -457,8 +477,7 @@ app.get('/api/player', async (req, res) => {
 app.get('/api/player/:id', async (req, res) => {
   try {
     await updatePendingRentAsync(req.params.id)
-    const jobsData = await loadDbFile('jobs.json')
-    const treasuresData = await loadDbFile('treasures.json')
+    const jobsData = await getJobsAsync()
     const playerData = await getUserProfileFromDb(req.params.id)
     if (!playerData) {
       return res.status(404).json({ error: 'Player not found' })
@@ -471,7 +490,7 @@ app.get('/api/player/:id', async (req, res) => {
     playerData.tierName = getTierDisplay(rankTierInfo.tier)
     playerData.rank = rankTierInfo.rank
 
-    const playerInfo = buildPlayerInfo(jobsData.jobs, treasuresData.treasures, playerData)
+    const playerInfo = buildPlayerInfo(jobsData.jobs, playerData)
     return res.json(playerInfo)
   } catch (error) {
     console.error('Failed to load player info for id', req.params.id, error)
@@ -481,7 +500,7 @@ app.get('/api/player/:id', async (req, res) => {
 
 app.get('/api/jobs', async (req, res) => {
   try {
-    const jobsData = await loadDbFile('jobs.json')
+    const jobsData = await getJobsAsync()
     return res.json(jobsData.jobs)
   } catch (error) {
     console.error('Failed to load jobs:', error)
@@ -514,7 +533,7 @@ app.post('/api/player/:id/salary', async (req, res) => {
     const playerData = await getUserProfileFromDb(userId)
     if (!playerData) return res.status(404).json({ error: 'Player not found' })
 
-    const jobsData = await loadDbFile('jobs.json')
+    const jobsData = await getJobsAsync()
     const job = getJobByLevel(jobsData.jobs, playerData.jobLevel)
 
     const cooldownMs = 0.50 * 60 * 60 * 1000
@@ -563,7 +582,7 @@ app.post('/api/player/:id/upgrade', async (req, res) => {
     const playerData = await getUserProfileFromDb(userId)
     if (!playerData) return res.status(404).json({ error: 'Player not found' })
 
-    const jobsData = await loadDbFile('jobs.json')
+    const jobsData = await getJobsAsync()
     const currentJobLevel = playerData.jobLevel || 1
     const maxLevel = Math.max(...jobsData.jobs.map(j => j.level))
 
@@ -733,8 +752,7 @@ const io = new Server(server, {
         if (userId && type) {
           if (type === 'force_profile_update') {
             try {
-              const jobsData = await loadDbFile('jobs.json')
-              const treasuresData = await loadDbFile('treasures.json')
+              const jobsData = await getJobsAsync()
               const playerData = await getUserProfileFromDb(userId)
               if (playerData) {
                 const inventory = await getInventoryForAccount(playerData)
@@ -745,7 +763,7 @@ const io = new Server(server, {
                 playerData.tierName = getTierDisplay(rankTierInfo.tier)
                 playerData.rank = rankTierInfo.rank
 
-                const playerInfo = buildPlayerInfo(jobsData.jobs, treasuresData.treasures, playerData)
+                const playerInfo = buildPlayerInfo(jobsData.jobs, playerData)
                 io.to(`user_${userId}`).emit('profile_update', playerInfo);
               }
             } catch (err) {
@@ -781,7 +799,7 @@ io.on('connection', (socket) => {
   socket.on('get_jobs', async (_, callback) => {
     if (!callback) return;
     try {
-      const jobsData = await loadDbFile('jobs.json')
+      const jobsData = await getJobsAsync()
       callback({ success: true, data: jobsData.jobs })
     } catch (error) {
       console.error('Failed to load jobs via socket:', error)
@@ -793,8 +811,7 @@ io.on('connection', (socket) => {
     if (!callback) return;
     try {
       await updatePendingRentAsync(userId)
-      const jobsData = await loadDbFile('jobs.json')
-      const treasuresData = await loadDbFile('treasures.json')
+      const jobsData = await getJobsAsync()
       const playerData = await getUserProfileFromDb(userId)
       if (!playerData) {
         return callback({ error: 'Player not found' })
@@ -807,7 +824,7 @@ io.on('connection', (socket) => {
       playerData.tierName = getTierDisplay(rankTierInfo.tier)
       playerData.rank = rankTierInfo.rank
 
-      const playerInfo = buildPlayerInfo(jobsData.jobs, treasuresData.treasures, playerData)
+      const playerInfo = buildPlayerInfo(jobsData.jobs, playerData)
       callback({ success: true, data: playerInfo })
     } catch (error) {
       console.error('Failed to load player info via socket:', error)
@@ -821,7 +838,7 @@ io.on('connection', (socket) => {
       const playerData = await getUserProfileFromDb(userId)
       if (!playerData) return callback({ error: 'Player not found' })
 
-      const jobsData = await loadDbFile('jobs.json')
+      const jobsData = await getJobsAsync()
       const job = getJobByLevel(jobsData.jobs, playerData.jobLevel)
 
       const cooldownMs = 0.50 * 60 * 60 * 1000
@@ -874,7 +891,7 @@ io.on('connection', (socket) => {
       const playerData = await getUserProfileFromDb(userId)
       if (!playerData) return callback({ error: 'Player not found' })
 
-      const jobsData = await loadDbFile('jobs.json')
+      const jobsData = await getJobsAsync()
       const currentJobLevel = playerData.jobLevel || 1
       const maxLevel = Math.max(...jobsData.jobs.map(j => j.level))
 
