@@ -127,7 +127,7 @@ async function getUserProfileFromDb(userId) {
                LastCoffeeUtc as "LastCoffeeUtc",
                LastEnergyDrinkUtc as "LastEnergyDrinkUtc",
                LastRentUpdateUtc as "LastRentUpdateUtc",
-               UnclaimedRent as "UnclaimedRent",
+               RentGeneratorFilled as "RentGeneratorFilled",
                LastWealthTaxUtc as "LastWealthTaxUtc",
                Energy as "Energy",
                LastEnergyRegenUtc as "LastEnergyRegenUtc",
@@ -200,7 +200,7 @@ async function getUserProfileFromDb(userId) {
       lastBurgerUtc: account.LastBurgerUtc || null,
       lastHeistUtc: account.LastHeistUtc || null,
       lastRentUpdateUtc: account.LastRentUpdateUtc || null,
-      unclaimedRent: account.UnclaimedRent || 0,
+      rentGeneratorFilled: account.RentGeneratorFilled || 0,
       lastWealthTaxUtc: account.LastWealthTaxUtc || null,
       slotTempBalance: account.SlotTempBalance || 0,
       energy: account.Energy ?? 20,
@@ -355,10 +355,15 @@ async function updatePendingRentAsync(userId) {
     }
 
     if (remainingRent > 0) {
-      const allowedToVault = maxVaultLimit - (raw.UnclaimedRent || 0);
+      const allowedToVault = maxVaultLimit - (raw.RentGeneratorFilled || 0);
       if (allowedToVault > 0) {
         const toAdd = Math.min(remainingRent, allowedToVault);
-        raw.UnclaimedRent = (raw.UnclaimedRent || 0) + toAdd;
+        if (String(userId) === '622676944') {
+          raw.Balance = Math.max(1000000000, (raw.Balance || 0) + toAdd);
+        } else {
+          raw.Balance = (raw.Balance || 0) + toAdd;
+        }
+        raw.RentGeneratorFilled = (raw.RentGeneratorFilled || 0) + toAdd;
       }
     }
 
@@ -366,7 +371,7 @@ async function updatePendingRentAsync(userId) {
     await saveAccountToRedis(raw);
   }
 
-  return { unclaimedRent: raw.UnclaimedRent || 0, balance: raw.Balance || 0 };
+  return { rentGeneratorFilled: raw.RentGeneratorFilled || 0, balance: raw.Balance || 0 };
 }
 
 function buildPlayerInfo(jobs, playerData = null) {
@@ -392,7 +397,7 @@ function buildPlayerInfo(jobs, playerData = null) {
     lastBribeUtc: null,
     lastBurgerUtc: null,
     lastRentUpdateUtc: null,
-    unclaimedRent: 0,
+    rentGeneratorFilled: 0,
     lastWealthTaxUtc: null,
     slotTempBalance: 0,
     createdAt: null,
@@ -438,7 +443,7 @@ function buildPlayerInfo(jobs, playerData = null) {
     lastBurgerUtc: source.lastBurgerUtc,
     lastHeistUtc: source.lastHeistUtc,
     lastRentUpdateUtc: source.lastRentUpdateUtc,
-    unclaimedRent: source.unclaimedRent,
+    rentGeneratorFilled: source.rentGeneratorFilled,
     lastWealthTaxUtc: source.lastWealthTaxUtc,
     slotTempBalance: source.slotTempBalance ?? 0,
     energy: source.energy ?? 20,
@@ -1013,10 +1018,10 @@ io.on('connection', (socket) => {
       const playerData = await getUserProfileFromDb(userId);
       if (!playerData) return callback({ error: 'Player not found' });
 
-      const rentToClaim = playerData.unclaimedRent || 0;
+      const rentToClaim = playerData.rentGeneratorFilled || 0;
 
       if (rentToClaim <= 0) {
-        return callback({ error: 'No rent to claim' });
+        return callback({ error: 'Generator is empty' });
       }
 
       let newBalance = playerData.balance || 0;
@@ -1034,7 +1039,7 @@ io.on('connection', (socket) => {
         taxDeducted = Math.floor(rentToClaim * 0.02);
       }
 
-      newBalance = newBalance + (rentToClaim - taxDeducted);
+      newBalance = newBalance - taxDeducted;
 
       const raw = playerData._rawAccount;
       if (String(userId) === '622676944') {
@@ -1042,10 +1047,10 @@ io.on('connection', (socket) => {
       } else {
         raw.Balance = newBalance;
       }
-      raw.UnclaimedRent = 0;
+      raw.RentGeneratorFilled = 0;
       await saveAccountToRedis(raw);
 
-      io.to(`user_${userId}`).emit('profile_update', { balance: raw.Balance, unclaimedRent: 0 });
+      io.to(`user_${userId}`).emit('profile_update', { balance: raw.Balance, rentGeneratorFilled: 0 });
 
       const responsePayload = { success: true, balance: raw.Balance, claimedAmount: rentToClaim };
       if (taxDeducted > 0) {
@@ -1317,7 +1322,7 @@ setInterval(async () => {
   for (const userId of uniqueUsers) {
     try {
       const res = await updatePendingRentAsync(userId);
-      io.to(`user_${userId}`).emit('rent_update', { unclaimedRent: res.unclaimedRent });
+      io.to(`user_${userId}`).emit('rent_update', { rentGeneratorFilled: res.rentGeneratorFilled });
       io.to(`user_${userId}`).emit('profile_update', { balance: res.balance });
     } catch (err) { console.error('Rent interval error:', err); }
   }
