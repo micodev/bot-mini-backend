@@ -115,9 +115,50 @@ async function getUserProfileFromDb(userId) {
     if (accDataStr) {
       account = JSON.parse(accDataStr);
     } else {
-      const res = await pool.query('SELECT Data FROM UserAccounts WHERE UserId = $1', [userId]);
+      const res = await pool.query(`
+        SELECT AccountId as "AccountId",
+               UserId as "UserId",
+               Balance as "Balance",
+               AccountNumber as "AccountNumber",
+               Thief as "Thief",
+               CardTypeId as "CardTypeId",
+               JobLevel as "JobLevel",
+               Gender as "Gender",
+               LastSalaryClaimUtc as "LastSalaryClaimUtc",
+               LastTreasureHuntUtc as "LastTreasureHuntUtc",
+               LastWheelSpinUtc as "LastWheelSpinUtc",
+               LastInvestUtc as "LastInvestUtc",
+               LastCoinFlipUtc as "LastCoinFlipUtc",
+               LastStealUtc as "LastStealUtc",
+               LastRaidUtc as "LastRaidUtc",
+               LastBribeUtc as "LastBribeUtc",
+               ShieldEndTimeUtc as "ShieldEndTimeUtc",
+               LastBurgerUtc as "LastBurgerUtc",
+               LastPizzaUtc as "LastPizzaUtc",
+               LastCoffeeUtc as "LastCoffeeUtc",
+               LastEnergyDrinkUtc as "LastEnergyDrinkUtc",
+               LastRentUpdateUtc as "LastRentUpdateUtc",
+               UnclaimedRent as "UnclaimedRent",
+               LastWealthTaxUtc as "LastWealthTaxUtc",
+               Energy as "Energy",
+               LastEnergyRegenUtc as "LastEnergyRegenUtc",
+               LuckBoostEndTimeUtc as "LuckBoostEndTimeUtc",
+               DoubleSellCharges as "DoubleSellCharges",
+               SoloRaidPasses as "SoloRaidPasses",
+               LastHeistUtc as "LastHeistUtc",
+               SlotTempBalance as "SlotTempBalance",
+               EnergyCrashPendingPenalty as "EnergyCrashPendingPenalty",
+               EnergyCrashPenalty as "EnergyCrashPenalty",
+               EnergyCrashEndTimeUtc as "EnergyCrashEndTimeUtc"
+        FROM Accounts WHERE UserId = $1
+      `, [userId]);
       if (res.rows.length > 0) {
-        account = res.rows[0].data;
+        account = res.rows[0];
+        
+        // Fetch inventory
+        const invRes = await pool.query('SELECT Id as "Id", AccountId as "AccountId", ItemId as "ItemId", PurchasePrice as "PurchasePrice", PurchaseDate as "PurchaseDate" FROM AccountItems WHERE AccountId = $1', [account.AccountId]);
+        account.Inventory = invRes.rows;
+
         // Optionally cache it
         await redisClient.set(`eco:acc:${userId}`, JSON.stringify(account));
       }
@@ -200,10 +241,10 @@ async function getPlayerRankAndTier(userId) {
   try {
     const sql = `
       SELECT 
-        (SELECT COUNT(*) FROM UserAccounts WHERE (Data->>'UserId')::bigint != 622676944) AS total,
-        (SELECT COUNT(*) FROM UserAccounts WHERE (Data->>'UserId')::bigint != 622676944 AND COALESCE((Data->>'Balance')::bigint, 0) < COALESCE((SELECT (Data->>'Balance')::bigint FROM UserAccounts WHERE UserId = $1), 0)) AS strictless,
-        (SELECT COUNT(*) FROM UserAccounts WHERE (Data->>'UserId')::bigint != 622676944 AND COALESCE((Data->>'Balance')::bigint, 0) = COALESCE((SELECT (Data->>'Balance')::bigint FROM UserAccounts WHERE UserId = $1), 0)) AS equal,
-        (SELECT COUNT(*) FROM UserAccounts WHERE (Data->>'UserId')::bigint != 622676944 AND COALESCE((Data->>'Balance')::bigint, 0) > COALESCE((SELECT (Data->>'Balance')::bigint FROM UserAccounts WHERE UserId = $1), 0)) AS strictgreater
+        (SELECT COUNT(*) FROM Accounts WHERE UserId != 622676944) AS total,
+        (SELECT COUNT(*) FROM Accounts WHERE UserId != 622676944 AND Balance < COALESCE((SELECT Balance FROM Accounts WHERE UserId = $1), 0)) AS strictless,
+        (SELECT COUNT(*) FROM Accounts WHERE UserId != 622676944 AND Balance = COALESCE((SELECT Balance FROM Accounts WHERE UserId = $1), 0)) AS equal,
+        (SELECT COUNT(*) FROM Accounts WHERE UserId != 622676944 AND Balance > COALESCE((SELECT Balance FROM Accounts WHERE UserId = $1), 0)) AS strictgreater
     `;
     const res = await pool.query(sql, [userId]);
     if (!res.rows || res.rows.length === 0 || parseInt(res.rows[0].total) === 0) return { tier: 5, rank: 1 };
