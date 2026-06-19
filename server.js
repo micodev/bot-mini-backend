@@ -21,6 +21,15 @@ const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL || 'postgres://bot_user:bot_pass@localhost:5433/economy_db'
 })
 
+function parseDateFlexible(dateStr) {
+  if (!dateStr) return new Date(NaN);
+  let formatted = String(dateStr).replace(' ', 'T');
+  if (!formatted.endsWith('Z')) {
+    formatted += 'Z';
+  }
+  return new Date(formatted);
+}
+
 pool.on('error', (err) => {
   console.error('Unexpected error on idle client', err)
 })
@@ -108,10 +117,10 @@ async function getUserProfileFromDb(userId) {
     const salaryCooldownMs = 0.50 * 60 * 60 * 1000;
     let nextSalaryClaimDate = new Date(Date.now() - 1000).toISOString();
     if (account.LastSalaryClaimUtc) {
-      const lastClaimStr = account.LastSalaryClaimUtc.endsWith('Z')
-        ? account.LastSalaryClaimUtc
-        : account.LastSalaryClaimUtc + 'Z';
-      nextSalaryClaimDate = new Date(new Date(lastClaimStr).getTime() + salaryCooldownMs).toISOString();
+      const lastClaimDate = parseDateFlexible(account.LastSalaryClaimUtc);
+      if (!isNaN(lastClaimDate.getTime())) {
+        nextSalaryClaimDate = new Date(lastClaimDate.getTime() + salaryCooldownMs).toISOString();
+      }
     }
 
     return {
@@ -207,8 +216,8 @@ async function consumeEnergy(userId, amount) {
 
   let penalty = raw.EnergyCrashPenalty || 0;
   if (raw.EnergyCrashEndTimeUtc) {
-    const penaltyEnd = new Date(raw.EnergyCrashEndTimeUtc.endsWith('Z') ? raw.EnergyCrashEndTimeUtc : raw.EnergyCrashEndTimeUtc + 'Z');
-    if (penaltyEnd <= new Date()) {
+    const penaltyEnd = parseDateFlexible(raw.EnergyCrashEndTimeUtc);
+    if (!isNaN(penaltyEnd.getTime()) && penaltyEnd <= new Date()) {
       penalty = 0;
       raw.EnergyCrashPendingPenalty = 0;
       raw.EnergyCrashPenalty = 0;
@@ -220,11 +229,11 @@ async function consumeEnergy(userId, amount) {
   let lastRegenUtc = raw.LastEnergyRegenUtc;
   const maxEnergy = MAX_ENERGY - penalty;
 
-  let newRegenTime = lastRegenUtc ? new Date(lastRegenUtc.endsWith('Z') ? lastRegenUtc : lastRegenUtc + 'Z') : new Date();
+  let newRegenTime = lastRegenUtc ? parseDateFlexible(lastRegenUtc) : new Date();
 
-  if (currentEnergy < maxEnergy && lastRegenUtc) {
-    const lastTime = newRegenTime.getTime();
+  if (currentEnergy < maxEnergy && lastRegenUtc && !isNaN(newRegenTime.getTime())) {
     const now = Date.now();
+    const lastTime = newRegenTime.getTime();
     const diffMs = now - lastTime;
     if (diffMs > 0) {
       const elapsedHours = diffMs / (1000 * 60 * 60);
@@ -285,7 +294,8 @@ async function updatePendingRentAsync(userId) {
   if (!profile) return { unclaimedRent: 0, balance: 0 };
   const raw = profile._rawAccount;
 
-  let lastRentUpdateMs = raw.LastRentUpdateUtc ? new Date(raw.LastRentUpdateUtc.endsWith('Z') ? raw.LastRentUpdateUtc : raw.LastRentUpdateUtc + 'Z').getTime() : 0;
+  let lastRentUpdateDate = parseDateFlexible(raw.LastRentUpdateUtc);
+  let lastRentUpdateMs = !isNaN(lastRentUpdateDate.getTime()) ? lastRentUpdateDate.getTime() : 0;
 
   const inventory = await getInventoryForAccount(profile);
   const marketPricesStr = await redisClient.get('eco:market:prices');
@@ -301,7 +311,8 @@ async function updatePendingRentAsync(userId) {
     let multiplier = catState && catState.Multiplier !== null ? catState.Multiplier : 1.0;
     let currentMarketPrice = Math.round((item.price * multiplier) / 1000.0) * 1000;
 
-    let purchaseDateMs = new Date(item.purchaseDate.endsWith('Z') ? item.purchaseDate : item.purchaseDate + 'Z').getTime();
+    let pDate = parseDateFlexible(item.purchaseDate);
+    let purchaseDateMs = !isNaN(pDate.getTime()) ? pDate.getTime() : 0;
 
     let startTimeMs = lastRentUpdateMs > purchaseDateMs ? lastRentUpdateMs : purchaseDateMs;
 
@@ -509,10 +520,7 @@ app.post('/api/player/:id/salary', async (req, res) => {
     const cooldownMs = 0.50 * 60 * 60 * 1000
     const now = new Date()
     if (playerData.lastSalaryClaimUtc) {
-      const lastClaimStr = playerData.lastSalaryClaimUtc.endsWith('Z')
-        ? playerData.lastSalaryClaimUtc
-        : playerData.lastSalaryClaimUtc + 'Z'
-      const lastClaim = new Date(lastClaimStr)
+      const lastClaim = parseDateFlexible(playerData.lastSalaryClaimUtc)
 
       if (now - lastClaim < cooldownMs) {
         return res.status(400).json({
@@ -607,10 +615,7 @@ app.post('/api/player/:id/wheel/spin', async (req, res) => {
     const now = new Date()
 
     if (playerData.lastWheelSpinUtc) {
-      const lastSpinStr = playerData.lastWheelSpinUtc.endsWith('Z')
-        ? playerData.lastWheelSpinUtc
-        : playerData.lastWheelSpinUtc + 'Z'
-      const lastSpin = new Date(lastSpinStr)
+      const lastSpin = parseDateFlexible(playerData.lastWheelSpinUtc)
 
       if (now - lastSpin < cooldownMs) {
         return res.status(400).json({
@@ -822,10 +827,7 @@ io.on('connection', (socket) => {
       const cooldownMs = 0.50 * 60 * 60 * 1000
       const now = new Date()
       if (playerData.lastSalaryClaimUtc) {
-        const lastClaimStr = playerData.lastSalaryClaimUtc.endsWith('Z')
-          ? playerData.lastSalaryClaimUtc
-          : playerData.lastSalaryClaimUtc + 'Z'
-        const lastClaim = new Date(lastClaimStr)
+        const lastClaim = parseDateFlexible(playerData.lastSalaryClaimUtc)
 
         if (now - lastClaim < cooldownMs) {
           return callback({
@@ -928,10 +930,7 @@ io.on('connection', (socket) => {
       const now = new Date()
 
       if (playerData.lastWheelSpinUtc) {
-        const lastSpinStr = playerData.lastWheelSpinUtc.endsWith('Z')
-          ? playerData.lastWheelSpinUtc
-          : playerData.lastWheelSpinUtc + 'Z'
-        const lastSpin = new Date(lastSpinStr)
+        const lastSpin = parseDateFlexible(playerData.lastWheelSpinUtc)
 
         if (now - lastSpin < cooldownMs) {
           return callback({
@@ -1193,10 +1192,7 @@ io.on('connection', (socket) => {
       const now = new Date();
 
       if (playerData.lastCoinFlipUtc) {
-        const lastFlipStr = playerData.lastCoinFlipUtc.endsWith('Z')
-          ? playerData.lastCoinFlipUtc
-          : playerData.lastCoinFlipUtc + 'Z';
-        const lastFlip = new Date(lastFlipStr);
+        const lastFlip = parseDateFlexible(playerData.lastCoinFlipUtc);
 
         if (now - lastFlip < cooldownMs) {
           return callback({
