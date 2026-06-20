@@ -245,6 +245,9 @@ async function consumeEnergy(userId, amount) {
   const maxEnergy = MAX_ENERGY - penalty;
 
   let newRegenTime = lastRegenUtc ? parseDateFlexible(lastRegenUtc) : new Date();
+  if (isNaN(newRegenTime.getTime())) {
+    newRegenTime = new Date();
+  }
 
   if (currentEnergy < maxEnergy && lastRegenUtc && !isNaN(newRegenTime.getTime())) {
     const now = Date.now();
@@ -297,7 +300,7 @@ async function getInventoryForAccount(playerData) {
 }
 
 const MARKET_CATEGORIES = ["Real Estate", "Vehicles", "Private Jets", "Jewelry", "Adult Toys", "Nightlife", "Sexy Clothing"];
-const RENT_YIELD_PER_MINUTE = parseFloat(process.env.RENT_YIELD_PER_MINUTE || 1.0);
+const RENT_YIELD_PER_MINUTE = parseFloat(process.env.RENT_YIELD_PER_MINUTE || 0.00005);
 const SALARY_COOLDOWN_HOURS = parseFloat(process.env.SALARY_COOLDOWN_HOURS || 0.001);
 const WHEEL_COOLDOWN_HOURS = parseFloat(process.env.WHEEL_COOLDOWN_HOURS || 0.001);
 const COIN_FLIP_COOLDOWN_HOURS = parseFloat(process.env.COIN_FLIP_COOLDOWN_HOURS || 0);
