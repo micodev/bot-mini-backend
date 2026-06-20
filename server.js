@@ -224,10 +224,7 @@ async function getUserProfileFromDb(userId) {
 }
 
 
-async function consumeEnergy(userId, amount) {
-  const profile = await getUserProfileFromDb(userId);
-  if (!profile) return { success: false, error: 'Player not found' };
-  const raw = profile._rawAccount;
+async function consumeEnergy(raw, amount) {
 
   let penalty = raw.EnergyCrashPenalty || 0;
   if (raw.EnergyCrashEndTimeUtc) {
@@ -273,8 +270,6 @@ async function consumeEnergy(userId, amount) {
   raw.Energy = currentEnergy - amount;
   const newRegenTimeStr = newRegenTime.toISOString().replace('T', ' ').substring(0, 19);
   raw.LastEnergyRegenUtc = newRegenTimeStr;
-
-  await saveAccountToRedis(raw);
 
   return { success: true, finalEnergy: raw.Energy, newRegenTimeStr };
 }
@@ -547,7 +542,7 @@ app.post('/api/player/:id/salary', async (req, res) => {
       }
     }
 
-    const energyResult = await consumeEnergy(userId, 2);
+    const energyResult = await consumeEnergy(playerData._rawAccount, 2);
     if (!energyResult.success) {
       return res.status(400).json({ error: `Not enough energy. Need 2 ⚡ (Current: ${energyResult.currentEnergy})` });
     }
@@ -653,7 +648,7 @@ app.post('/api/player/:id/wheel/spin', async (req, res) => {
       })
     }
 
-    const energyResult = await consumeEnergy(userId, 2);
+    const energyResult = await consumeEnergy(playerData._rawAccount, 2);
     if (!energyResult.success) {
       return res.status(400).json({ error: `Not enough energy. Need 2 ⚡ (Current: ${energyResult.currentEnergy})` });
     }
@@ -844,7 +839,7 @@ io.on('connection', (socket) => {
         }
       }
 
-      const energyResult = await consumeEnergy(userId, 2);
+      const energyResult = await consumeEnergy(playerData._rawAccount, 2);
       if (!energyResult.success) {
         return callback({ error: `Not enough energy. Need 2 ⚡ (Current: ${energyResult.currentEnergy})` });
       }
@@ -958,7 +953,7 @@ io.on('connection', (socket) => {
         })
       }
 
-      const energyResult = await consumeEnergy(userId, 2);
+      const energyResult = await consumeEnergy(playerData._rawAccount, 2);
       if (!energyResult.success) {
         return callback({ error: `Not enough energy. Need 2 ⚡ (Current: ${energyResult.currentEnergy})` });
       }
@@ -1082,7 +1077,7 @@ io.on('connection', (socket) => {
         return callback({ error: `Insufficient balance to start pot (Need $${WAGER.toLocaleString()})` });
       }
 
-      const energyResult = await consumeEnergy(userId, 1);
+      const energyResult = await consumeEnergy(playerData._rawAccount, 1);
       if (!energyResult.success) {
         return callback({ error: `Not enough energy to spin. Need 1 ⚡ (Current: ${energyResult.currentEnergy})` });
       }
@@ -1218,7 +1213,7 @@ io.on('connection', (socket) => {
         return callback({ error: 'Insufficient balance' });
       }
 
-      const energyResult = await consumeEnergy(userId, 1);
+      const energyResult = await consumeEnergy(playerData._rawAccount, 1);
       if (!energyResult.success) {
         return callback({ error: `Not enough energy. Need 1 ⚡ (Current: ${energyResult.currentEnergy})` });
       }
@@ -1249,11 +1244,12 @@ io.on('connection', (socket) => {
 
       let finalEnergy;
       if (typeof energyUsed === 'number' && energyUsed > 0) {
-        const energyResult = await consumeEnergy(userId, energyUsed);
+        const energyResult = await consumeEnergy(playerData._rawAccount, energyUsed);
         if (!energyResult.success) {
           return callback({ error: `Not enough energy. Need ${energyUsed} ⚡` });
         }
         finalEnergy = energyResult.finalEnergy;
+        await saveAccountToRedis(playerData._rawAccount);
       } else {
         return callback({ error: 'Invalid energy amount' });
       }
@@ -1288,7 +1284,7 @@ io.on('connection', (socket) => {
 
       let finalEnergy;
       if (typeof energyUsed === 'number' && energyUsed > 0) {
-        const energyResult = await consumeEnergy(userId, energyUsed);
+        const energyResult = await consumeEnergy(playerData._rawAccount, energyUsed);
         if (!energyResult.success) {
           return callback({ error: `Not enough energy. Need ${energyUsed} ⚡` });
         }
