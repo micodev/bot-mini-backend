@@ -156,7 +156,7 @@ async function getUserProfileFromDb(userId) {
 
     let user = userDataStr ? JSON.parse(userDataStr) : {};
 
-    const salaryCooldownMs = 0.50 * 60 * 60 * 1000;
+    const salaryCooldownMs = SALARY_COOLDOWN_HOURS * 60 * 60 * 1000;
     let nextSalaryClaimDate = new Date(Date.now() - 1000).toISOString();
     if (account.LastSalaryClaimUtc) {
       const lastClaimDate = parseDateFlexible(account.LastSalaryClaimUtc);
@@ -529,7 +529,7 @@ app.post('/api/player/:id/salary', async (req, res) => {
     const jobsData = await getJobsAsync()
     const job = getJobByLevel(jobsData.jobs, playerData.jobLevel)
 
-    const cooldownMs = 0.50 * 60 * 60 * 1000
+    const cooldownMs = SALARY_COOLDOWN_HOURS * 60 * 60 * 1000
     const now = new Date()
     if (playerData.lastSalaryClaimUtc) {
       const lastClaim = parseDateFlexible(playerData.lastSalaryClaimUtc)
@@ -622,7 +622,7 @@ app.post('/api/player/:id/wheel/spin', async (req, res) => {
     const playerData = await getUserProfileFromDb(userId)
     if (!playerData) return res.status(404).json({ error: 'Player not found' })
 
-    const cooldownHours = 0.10
+    const cooldownHours = WHEEL_COOLDOWN_HOURS
     const cooldownMs = cooldownHours * 60 * 60 * 1000
     const now = new Date()
 
@@ -796,6 +796,20 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('get_config', async (_, callback) => {
+    if (!callback) return;
+    callback({
+      success: true,
+      data: {
+        SALARY_COOLDOWN_HOURS,
+        WHEEL_COOLDOWN_HOURS,
+        COIN_FLIP_COOLDOWN_HOURS,
+        MAX_ENERGY,
+        ENERGY_REGEN_PER_HOUR
+      }
+    });
+  });
+
   socket.on('request_profile', async (userId, callback) => {
     if (!callback) return;
     try {
@@ -826,7 +840,7 @@ io.on('connection', (socket) => {
       const jobsData = await getJobsAsync()
       const job = getJobByLevel(jobsData.jobs, playerData.jobLevel)
 
-      const cooldownMs = 0.50 * 60 * 60 * 1000
+      const cooldownMs = SALARY_COOLDOWN_HOURS * 60 * 60 * 1000
       const now = new Date()
       if (playerData.lastSalaryClaimUtc) {
         const lastClaim = parseDateFlexible(playerData.lastSalaryClaimUtc)
@@ -927,7 +941,7 @@ io.on('connection', (socket) => {
       const playerData = await getUserProfileFromDb(userId)
       if (!playerData) return callback({ error: 'Player not found' })
 
-      const cooldownHours = 0.10
+      const cooldownHours = WHEEL_COOLDOWN_HOURS
       const cooldownMs = cooldownHours * 60 * 60 * 1000
       const now = new Date()
 
@@ -1189,7 +1203,7 @@ io.on('connection', (socket) => {
       const playerData = await getUserProfileFromDb(userId);
       if (!playerData) return callback({ error: 'Player not found' });
 
-      const cooldownHours = 0.05; // 3 minutes
+      const cooldownHours = COIN_FLIP_COOLDOWN_HOURS;
       const cooldownMs = cooldownHours * 60 * 60 * 1000;
       const now = new Date();
 
