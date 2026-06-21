@@ -372,6 +372,15 @@ async function updatePendingRentAsync(userId) {
   return { rentGeneratorFilled: raw.RentGeneratorFilled || 0, balance: raw.Balance || 0, energy: raw.Energy ?? 20 };
 }
 
+async function publishGameLog(userId, name, game, details) {
+  try {
+    const payload = JSON.stringify({ userId, name, game, details });
+    await redisClient.publish('miniapp_game_logs', payload);
+  } catch (err) {
+    console.error('Failed to publish game log:', err);
+  }
+}
+
 function buildPlayerInfo(jobs, playerData = null) {
   const defaultPlayer = {
     id: 'demo-player-1',
@@ -1191,6 +1200,9 @@ io.on('connection', (socket) => {
         resultSlots: [slot1, slot2, slot3],
         message
       });
+
+      const logDetails = `Result: [${slot1}] [${slot2}] [${slot3}]\nPot: $${newTempBalance.toLocaleString()} (Delta: ${delta >= 0 ? '+' : ''}$${delta.toLocaleString()})`;
+      publishGameLog(userId, playerData.name, 'slot', logDetails);
     } catch (error) {
       console.error('Failed to spin slots:', error);
       callback({ error: 'Internal Server Error' });
@@ -1318,6 +1330,9 @@ io.on('connection', (socket) => {
 
       io.to(`user_${userId}`).emit('profile_update', payload);
       callback({ success: true, ...payload });
+
+      const logDetails = `Wager: $${wager.toLocaleString()}\nWinnings: $${winnings.toLocaleString()}\nNet: ${winnings - wager >= 0 ? '+' : ''}$${(winnings - wager).toLocaleString()}`;
+      publishGameLog(userId, playerData.name, 'plinko', logDetails);
     } catch (error) {
       console.error('Failed to settle plinko:', error);
       callback({ error: 'Internal Server Error' });
